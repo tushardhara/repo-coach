@@ -1,0 +1,18 @@
+# RepoCoach working files
+finetune-workspace/
+*.jsonl
+*.log
+base-model/
+adapters/
+my-coder-model/
+my-coder-gguf/
+Modelfile
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+finetune-env/
+
+# OS
+.DS_Store

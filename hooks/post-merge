@@ -1,0 +1,14 @@
+#!/bin/bash
+# RepoCoach post-merge hook
+# Triggers a smart retrain check after merges into main.
+# Install: cp hooks/post-merge <your-repo>/.git/hooks/ && chmod +x ...
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+[ "$BRANCH" != "main" ] && exit 0   # only on main
+
+REPO_COACH_DIR="$HOME/repo-coach"   # adjust if installed elsewhere
+if [ -d "$REPO_COACH_DIR" ]; then
+  echo "🦴 RepoCoach: checking if retrain is warranted..."
+  # Run in background so the merge isn't blocked
+  ( bash "$REPO_COACH_DIR/scripts/retrain.sh" >> "$HOME/finetune-workspace/.retrain/hook.log" 2>&1 & )
+fi

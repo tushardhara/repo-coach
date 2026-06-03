@@ -1,0 +1,6 @@
+# Pinned for reproducibility. Update deliberately, not accidentally.
+mlx-lm>=0.30.0,<0.31.0
+mlx>=0.20.0
+huggingface_hub>=0.25.0
+transformers>=4.45.0
+datasets>=3.0.0
