@@ -41,7 +41,7 @@ DB reads: [external_voucher_codes]. DB writes: [voucher_assignments]. Queue: [as
 ```bash
 git clone https://github.com/YOUR_USERNAME/repo-coach.git
 cd repo-coach
-pip install -e .
+python3 -m pip install --break-system-packages -e .
 
 # Build the Knowledge Graph for your repo
 repo-coach build ~/your-repo
