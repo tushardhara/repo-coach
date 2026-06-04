@@ -54,11 +54,12 @@ if os.path.exists(GRAPH_PATH):
     try:
         sys.path.insert(0, SCRIPTS_DIR)
         from graph_builder import query_graph
-        graph = json.load(open(GRAPH_PATH))
+        graph     = json.load(open(GRAPH_PATH))
+        repo_root = graph.get('repo', '')  # pass repo root so query_graph fetches real code
         n_aug = 0
         for rec in train:
             q   = rec["messages"][0]["content"]
-            ctx = query_graph(q, graph)
+            ctx = query_graph(q, graph, repo_root=repo_root)
             if ctx:
                 aug = json.loads(json.dumps(rec))          # deep copy
                 aug["messages"][0]["content"] = ctx + "\n\n" + q
