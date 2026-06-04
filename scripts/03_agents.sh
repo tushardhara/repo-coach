@@ -45,6 +45,6 @@ done
 while :; do
   R=0; for p in "${PIDS[@]}"; do kill -0 "$p" 2>/dev/null && R=$((R+1)); done
   D=0; for i in $(seq 1 $AGENTS); do [ -f "agents/dataset_$i.jsonl" ] && D=$((D+$(wc -l < "agents/dataset_$i.jsonl"|tr -d ' '))); done
-  echo -ne "\rRunning: $R | pairs: $D   "; [ "$R" -eq 0 ] && break; sleep 5
+  echo "  agents running: $R | pairs so far: $D"; [ "$R" -eq 0 ] && break; sleep 15
 done
 wait; echo -e "\n✅ Agents done"

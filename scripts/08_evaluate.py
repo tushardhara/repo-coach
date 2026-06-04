@@ -17,6 +17,6 @@ try:
 except Exception:
     qs = ["What does this project do?", "How is the code organized?"]
 for i, q in enumerate(qs, 1):
-    r = subprocess.run(["python3","-m","mlx_lm.generate","--model","./my-coder-model",
+    r = subprocess.run(["python3","-m","mlx_lm","generate","--model","./my-coder-model",
         "--max-tokens","250","--prompt",q], capture_output=True, text=True)
     print(f"\nQ{i}: {q}\nA: {r.stdout.strip()[:300]}\n" + "-"*50)

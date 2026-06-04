@@ -16,3 +16,9 @@ finetune-env/
 
 # OS
 .DS_Store
+
+# Private config (contains company repo URL — never commit)
+configs/config.env
+
+# Claude Code local state
+.claude/

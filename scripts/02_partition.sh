@@ -13,7 +13,7 @@ find ~/"$REPO_NAME" -type f \( \
   -o -name "*.jsx" -o -name "*.go" -o -name "*.rs" -o -name "*.java" \
   -o -name "*.cpp" -o -name "*.c" -o -name "*.rb" -o -name "*.swift" \
   -o -name "*.kt" -o -name "*.php" -o -name "*.cs" \
-) | grep -v -E "(node_modules|/\.git/|__pycache__|/dist/|/build/|\.venv|/vendor/)" > all_files.txt
+\) | grep -v -E "(node_modules|/\.git/|__pycache__|/dist/|/build/|\.venv|/vendor/)" > all_files.txt
 TOTAL=$(wc -l < all_files.txt | tr -d ' ')
 echo "Found $TOTAL code files"
 [ "$TOTAL" -eq 0 ] && { echo "❌ No code files found"; exit 1; }

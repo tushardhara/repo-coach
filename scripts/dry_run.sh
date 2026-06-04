@@ -39,7 +39,7 @@ echo "→ Testing fuse..."
 mlx_lm.fuse --model ./m --adapter-path ./adapters --save-path ./fused || { echo "❌ fuse failed"; exit 1; }
 
 echo "→ Testing generate..."
-python3 -m mlx_lm.generate --model ./fused --max-tokens 10 --prompt "Hi" || { echo "❌ generate failed"; exit 1; }
+python3 -m mlx_lm generate --model ./fused --max-tokens 10 --prompt "Hi" || { echo "❌ generate failed"; exit 1; }
 
 echo "→ Testing claude -p (judge path)..."
 claude -p "Reply with only the number 5" --output-format json --allowedTools "Read" >/dev/null 2>&1 || echo "⚠️  claude -p check inconclusive (verify manually)"
