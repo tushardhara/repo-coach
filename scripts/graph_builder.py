@@ -30,7 +30,7 @@ SKIP_DIRS  = {'node_modules', '.git', '__pycache__', 'dist', 'build', '.venv', '
 DEFAULT_GRAPH = os.path.expanduser('~/finetune-workspace/graph.json')
 EXT_LANG   = {'.go': 'go', '.py': 'python', '.js': 'javascript',
               '.ts': 'typescript', '.jsx': 'javascript', '.tsx': 'typescript'}
-MAX_SNIPPET = 25   # max lines per code snippet in query output
+MAX_SNIPPET = 12   # max lines per code snippet in query output
 ENRICH_MAX_FILE_LINES = 300  # skip LLM enrichment for files longer than this
 
 
@@ -402,7 +402,7 @@ def _read_snippet(repo_root: str, file_path: str, line_range: list) -> str:
         return ''
 
 
-def query_graph(question: str, graph: dict, top_k: int = 5,
+def query_graph(question: str, graph: dict, top_k: int = 3,
                 repo_root: str = None) -> str:
     """Keyword RAG over the graph.
 
