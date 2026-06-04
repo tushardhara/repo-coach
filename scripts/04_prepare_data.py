@@ -57,17 +57,26 @@ else:
 graph = None
 repo_root = ''
 
-existing_repo = ''
+existing_repo     = ''
+existing_enriched = False
 if os.path.exists(GRAPH_PATH):
     try:
-        existing_repo = json.load(open(GRAPH_PATH)).get('repo', '')
+        _existing = json.load(open(GRAPH_PATH))
+        existing_repo     = _existing.get('repo', '')
+        existing_enriched = _existing['stats'].get('enriched', False)
     except Exception:
         pass
 
-# Prefer existing graph repo path; fall back to default clone location
 candidate = existing_repo or os.path.expanduser('~/Promotions')
 
-if os.path.isdir(candidate):
+if existing_enriched:
+    # Enriched graph (LLM summaries) — never overwrite, rebuild would lose summaries
+    graph     = json.load(open(GRAPH_PATH))
+    repo_root = graph.get('repo', '')
+    s         = graph['stats']
+    print(f"\nReusing enriched graph ({s['files']} files, {s['functions']} fns) — LLM summaries preserved")
+    print("  To rebuild without summaries: delete graph.json first")
+elif os.path.isdir(candidate):
     repo_root = candidate
     print(f"\nBuilding graph from {repo_root} ...")
     graph = build_graph(repo_root)
@@ -76,10 +85,9 @@ if os.path.isdir(candidate):
     print(f"Graph: {s['files']} files · {s['functions']} fns · {s['classes']} classes")
     print("  (run graph_builder.py --enrich to add LLM summaries for richer context)")
 elif os.path.exists(GRAPH_PATH):
-    # Can't rebuild (repo missing) — use cached graph
-    graph = json.load(open(GRAPH_PATH))
+    graph     = json.load(open(GRAPH_PATH))
     repo_root = graph.get('repo', '')
-    s = graph['stats']
+    s         = graph['stats']
     print(f"Repo not found at {candidate} — using cached graph ({s['files']} files)")
 else:
     print("No repo and no cached graph — skipping graph augmentation")
