@@ -42,6 +42,7 @@ class OllamaClient:
             "options": {
                 "temperature": self.temperature,
                 "top_p": self.top_p,
+                "num_predict": 512,
             },
         }
         data = json.dumps(payload).encode()

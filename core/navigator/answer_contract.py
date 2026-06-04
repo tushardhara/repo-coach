@@ -106,6 +106,16 @@ def parse_response(text: str) -> Optional[ParsedResponse]:
         if result is not None:
             return result
 
+    # Strategy 4: truncated JSON fallback — extract partial answer from incomplete JSON
+    # e.g. {"action":"final","answer":"some text... (cut off before closing "})
+    trunc_match = re.search(r'"action"\s*:\s*"final".*?"answer"\s*:\s*"(.*)', stripped, re.DOTALL)
+    if trunc_match:
+        partial = trunc_match.group(1)
+        # Strip trailing incomplete escape or quote
+        partial = partial.rstrip('\\"').rstrip()
+        if partial:
+            return FinalAnswer(answer=partial + " [answer truncated]")
+
     return None
 
 

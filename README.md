@@ -15,8 +15,9 @@ Ask a question → the agent picks the right navigation tool → traverses the K
 ```
 $ repo-coach ask "How does voucher assignment flow?" --repo ~/my-repo
 
-[tool] find_routes({"query": "assign"})
-[tool] build_flow({"entrypoint_id": "go:function:routes/assign.go:AssignVoucher"})
+Tools used: 2
+  find_routes({'query': 'assign'}) -> [{"handler_id": "go:function:routes/assign.go:AssignVoucher"...
+  build_flow({'entrypoint_id': 'go:function:routes/assign.go:AssignVoucher'}) -> {"chain": [...
 
 Answer: AssignVoucher validates the coupon via CheckUniqueVoucherReaderDB,
 writes to external_voucher_codes, then publishes to the assignment queue.
@@ -91,23 +92,23 @@ The agent calls tools in a JSON protocol loop (max 8 calls), accumulates evidenc
 # Build the index (run once, re-run when code changes significantly)
 repo-coach build ~/your-repo
 
-# Ask a natural language question
+# Ask a natural language question (Qwen agent + tool loop)
 repo-coach ask "Who calls CheckUniqueVoucherReaderDB?" --repo ~/your-repo
 
-# Inspect call flow for a route/function
-repo-coach explain "voucher assignment" --repo ~/your-repo
+# Explain a route's full call flow
+repo-coach explain --route "POST /assign" ~/your-repo
 
 # Impact analysis — what breaks if this function changes?
-repo-coach impact --symbol AssignVoucher --repo ~/your-repo
+repo-coach impact --symbol AssignVoucher ~/your-repo
 
 # DB usage — what reads/writes this table?
-repo-coach table external_voucher_codes --repo ~/your-repo
+repo-coach table external_voucher_codes ~/your-repo
 
 # Debug — show graph evidence without calling Ollama
-repo-coach debug-context "How does login work?" --repo ~/your-repo
+repo-coach debug-context "How does login work?" ~/your-repo
 
 # Verify Ollama tool-calling is working
-repo-coach test-tool-calling --repo ~/your-repo
+repo-coach test-tool-calling ~/your-repo
 ```
 
 ---
@@ -182,8 +183,8 @@ repo-coach/
 export REPO_COACH_MODEL=qwen2.5-coder:7b
 repo-coach ask "..." --repo ~/your-repo
 
-# Verbose build output
-repo-coach build ~/your-repo --verbose
+# Build is verbose by default; suppress with --no-verbose if needed
+repo-coach build ~/your-repo
 ```
 
 ---

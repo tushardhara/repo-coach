@@ -12,17 +12,17 @@ Rules:
 - Use tool results only.
 - If information is missing after tool lookup, say "Not found in Code Knowledge Graph."
 
-Available tools:
-- find_symbols: search symbols by name/keyword
-- find_routes: search route handlers by path or method
-- get_symbol: get details for a specific symbol id
-- get_code: get source code for a symbol id
-- get_callees: get functions called by a symbol (with depth)
-- get_callers: get functions that call a symbol (with depth)
-- get_facts: get side effects (DB, Redis, queues, events) for a symbol
-- search_table: find all readers and writers of a database table
-- build_flow: build full call flow from an entrypoint symbol id
-- build_impact: find all callers and affected routes for a symbol
+Available tools (use EXACT arg names shown):
+- find_symbols        args: {"query": "<name>", "limit": 10}
+- find_routes         args: {"query": "<path or method>", "limit": 10}
+- get_symbol          args: {"symbol_id": "<id>"}
+- get_code            args: {"symbol_id": "<id>"}
+- get_callees         args: {"symbol_id": "<id>", "depth": 2}
+- get_callers         args: {"symbol_id": "<id>", "depth": 2}
+- get_facts           args: {"symbol_id": "<id>"}
+- search_table        args: {"table_name": "<name>"}
+- build_flow          args: {"entrypoint_id": "<id>"}
+- build_impact        args: {"symbol_id": "<id>"}
 
 Tool request format (output ONLY this JSON, no other text):
 {"action":"tool","tool":"tool_name","args":{"key":"value"}}

@@ -15,6 +15,7 @@ from core.llm.ollama_client import OllamaClient, OllamaError
 from core.llm.prompts import SYSTEM_PROMPT, MAX_TOOL_CALLS, format_tool_result, TOOL_CORRECTION_PROMPT
 from core.navigator.answer_contract import parse_response, ToolCall, FinalAnswer, is_valid_tool_call
 from core.navigator.graph_tools import GraphStore, VALID_TOOLS
+from core.navigator.planner import classify_question, suggest_first_tool
 
 
 class AgentLoop:
@@ -37,6 +38,79 @@ class AgentLoop:
         tool_call_count = 0
         retry_count = 0
         MAX_RETRIES = 2
+
+        # Seed the first tool call from the planner so Qwen uses correct arg names
+        strategy = classify_question(question)
+        first_tool, first_args = suggest_first_tool(question, strategy)
+        first_call_json = json.dumps({"action": "tool", "tool": first_tool, "args": first_args})
+        try:
+            first_result = self.graph.dispatch_tool(first_tool, first_args)
+        except Exception as e:
+            first_result = json.dumps({"error": str(e)})
+        tool_call_count += 1
+        tool_log.append({"tool": first_tool, "args": first_args, "result_summary": first_result[:200]})
+        if self.verbose:
+            print(f"[loop] seeded tool={first_tool} args={first_args}")
+        messages.append({"role": "assistant", "content": first_call_json})
+        messages.append({
+            "role": "user",
+            "content": format_tool_result(first_tool, first_args, first_result),
+        })
+
+        # For impact/flow strategies, seed a second tool call automatically
+        # so Qwen doesn't short-circuit after the symbol lookup
+        if strategy == "impact" and tool_call_count < MAX_TOOL_CALLS:
+            try:
+                syms = json.loads(first_result)
+                sym_id = syms[0].get("id", "") if isinstance(syms, list) and syms else ""
+            except Exception:
+                sym_id = ""
+            if sym_id:
+                second_tool, second_args = "build_impact", {"symbol_id": sym_id}
+                second_call_json = json.dumps({"action": "tool", "tool": second_tool, "args": second_args})
+                try:
+                    second_result = self.graph.dispatch_tool(second_tool, second_args)
+                except Exception as e:
+                    second_result = json.dumps({"error": str(e)})
+                tool_call_count += 1
+                tool_log.append({"tool": second_tool, "args": second_args, "result_summary": second_result[:200]})
+                if self.verbose:
+                    print(f"[loop] seeded tool={second_tool} args={second_args}")
+                messages.append({"role": "assistant", "content": second_call_json})
+                messages.append({
+                    "role": "user",
+                    "content": format_tool_result(second_tool, second_args, second_result),
+                })
+
+        elif strategy == "flow" and tool_call_count < MAX_TOOL_CALLS:
+            try:
+                routes = json.loads(first_result)
+                handler_id = ""
+                if isinstance(routes, list):
+                    for r in routes:
+                        hid = r.get("handler_id", "")
+                        if hid and not any(w in hid.split(":")[-1].lower()
+                                           for w in ("setup", "init", "main", "register", "routes")):
+                            handler_id = hid
+                            break
+            except Exception:
+                handler_id = ""
+            if handler_id:
+                second_tool, second_args = "build_flow", {"entrypoint_id": handler_id}
+                second_call_json = json.dumps({"action": "tool", "tool": second_tool, "args": second_args})
+                try:
+                    second_result = self.graph.dispatch_tool(second_tool, second_args)
+                except Exception as e:
+                    second_result = json.dumps({"error": str(e)})
+                tool_call_count += 1
+                tool_log.append({"tool": second_tool, "args": second_args, "result_summary": second_result[:200]})
+                if self.verbose:
+                    print(f"[loop] seeded tool={second_tool} args={second_args}")
+                messages.append({"role": "assistant", "content": second_call_json})
+                messages.append({
+                    "role": "user",
+                    "content": format_tool_result(second_tool, second_args, second_result),
+                })
 
         while tool_call_count < MAX_TOOL_CALLS:
             # Call model
