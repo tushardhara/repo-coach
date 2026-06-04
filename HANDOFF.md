@@ -25,12 +25,16 @@ run.sh       → orchestrates phases 0-9:
   03 agents      — parallel claude -p agents generate DIVERSE training pairs
   04 prepare     — merge/dedupe, 80/10/10 train/valid/test split, auto-size params
   05 download    — fetch base model from HuggingFace
-  06 train       — MLX LoRA fine-tune via YAML config (auto batch_size)
+  06 train       — MLX LoRA fine-tune via YAML config (auto batch_size from RAM)
   07 fuse        — merge adapter into standalone model
   08 evaluate    — eyeball test on held-out questions
-  benchmark.py   — THE SCORE: base vs fine-tuned vs Haiku, LLM-judged → VERDICT
+  benchmark.py   — THE SCORE: base vs fine-tuned vs fine-tuned+graph vs Haiku → VERDICT
   09 export      — convert to GGUF, register with Ollama
 retrain.sh   → smart change-aware retrain (only when >= RETRAIN_MIN_CHANGED_FILES changed)
+
+graph_builder.py  → standalone RAG graph tool:
+  --repo  ~/your-repo  --out ~/finetune-workspace/graph.json   (build)
+  --query "how does auth work"                                   (query)
 ```
 
 ---
@@ -46,6 +50,8 @@ retrain.sh   → smart change-aware retrain (only when >= RETRAIN_MIN_CHANGED_FI
 7. **Held-out `test.jsonl`** powers the benchmark — never merge it back into training.
 8. **`mlx_lm generate`** (space, not dot) — `mlx_lm.generate` is deprecated in mlx-lm 0.22+.
 9. **Fine-tuning teaches patterns, not recall.** For "know my latest code" use retrieval (Continue.dev `@codebase`), not retraining.
+10. **`graph_builder.py` is Python-only + keyword RAG.** AST-based, no regex for other languages. v2 TODO: `all-MiniLM-L6-v2` embeddings (~80MB, runs locally).
+11. **`configs/config.env` is gitignored.** Contains private repo URL — NEVER commit. Use `configs/config.env.example` as the template.
 
 ---
 
@@ -66,9 +72,17 @@ Hardware:   MacBook Pro, Apple M3 Pro, 18GB
 
 - Pipeline ran end-to-end on `pallets/flask` as a public test before the private repo.
 - 495 training pairs generated, 397/49/49 train/valid/test split.
-- LoRA training: 800 effective iters (resumed from checkpoint after OOM crash, fixed with auto batch_size).
-- **VERDICT: NOT YET** — fine-tuned 1.4 vs base 1.4 vs Haiku 2.47.
-- Expected: fine-tuning on a public library the base model already knows shows no gain. Private repo will show real delta.
+- LoRA training: ~800 effective iters (crashed at iter 200 and 300 due to OOM; resumed from checkpoints; fixed by auto batch_size).
+- `graph_builder.py` built for flask: 83 files, 1097 functions, 196 import edges.
+
+**Benchmark history:**
+
+| Date | Base | Fine-tuned | Fine-tuned+Graph | Haiku | Verdict |
+|---|---|---|---|---|---|
+| 2026-06-04 11:28 | 1.4 | 1.47 | — | 1.73 | USEFUL |
+| 2026-06-04 11:59 | 1.4 | 1.40 | — | 2.47 | NOT YET |
+
+Expected: fine-tuning on a public library the base model already knows shows no gain. **Private repo will show real delta.**
 
 ---
 
@@ -77,8 +91,15 @@ Hardware:   MacBook Pro, Apple M3 Pro, 18GB
 Switch to private repo:
 ```bash
 # Edit configs/config.env (gitignored — safe)
-REPO_URL="git@github.com:YourOrg/YourRepo.git"
+cp configs/config.env.example configs/config.env
+# Set REPO_URL="git@github.com:YourOrg/YourRepo.git"
 ```
+
+Build the graph for the private repo before benchmarking:
+```bash
+python3 scripts/graph_builder.py --repo ~/YourRepo --out ~/finetune-workspace/graph.json
+```
+
 Then run:
 ```bash
 bash scripts/dry_run.sh   # 2 min sanity check

@@ -37,9 +37,10 @@ KEY DESIGN DECISIONS (do not regress):
 - Every `claude -p` uses `--allowedTools "Read,Glob,Grep,Write"` so agents NEVER hang.
 - Every `claude -p` uses `--output-format json` for reliable parsing.
 - Training uses YAML config (`configs/lora_config.yaml`), NOT CLI flags — flag names drift between mlx-lm versions.
-- `batch_size` is auto-detected from system RAM — never hardcode it.
+- `batch_size` is auto-detected from system RAM via `sysctl hw.memsize` (8GB→1, 16GB→2, 24GB→4, 32GB+→8).
 - `test.jsonl` is held out from training and used only by `benchmark.py`.
 - Use `python3 -m mlx_lm generate` (space, not dot) — `mlx_lm.generate` is deprecated.
+- `configs/config.env` is gitignored — never commit it. Copy from `configs/config.env.example`.
 
 ═══════════════════════════════════════════════════════════
 ## PHASE 0 — Preflight Checks
@@ -308,10 +309,19 @@ PYEOF
 ```bash
 source ~/finetune-env/bin/activate
 cd ~/finetune-workspace
-python3 /path/to/repo-coach/scripts/benchmark.py
+
+# Optional: build graph first for the GraphRAG hybrid column
+# python3 ~/repo-coach/scripts/graph_builder.py --repo ~/YourRepo --out ./graph.json
+
+python3 ~/repo-coach/scripts/benchmark.py
 ```
 
-Scores base vs fine-tuned vs Haiku on 15 held-out questions (1–5 each).
+Scores **4 models** on 15 held-out questions (1–5 each):
+- Base Qwen (no fine-tuning)
+- Fine-tuned model
+- Fine-tuned + graph RAG context (if `graph.json` exists in workspace)
+- Claude Haiku
+
 Prints: **STRONG / USEFUL / NOT YET**
 
 ═══════════════════════════════════════════════════════════
@@ -370,6 +380,7 @@ echo "✅ Run: ollama run ${REPO_NAME}-coder"
 ## TO RUN
 ═══════════════════════════════════════════════════════════
 
-1. Copy `configs/config.env.example` → `configs/config.env`, fill in `REPO_URL`.
+1. Copy `configs/config.env.example` → `configs/config.env`, fill in `REPO_URL`. (`config.env` is gitignored — safe for private repos.)
 2. Run `bash scripts/dry_run.sh` first (2 min sanity check).
 3. Run `bash scripts/run.sh` — executes Phase 0→9, ends with VERDICT.
+4. Optional: `python3 scripts/graph_builder.py --repo ~/YourRepo --out ~/finetune-workspace/graph.json` then re-run `benchmark.py` to see GraphRAG hybrid score.
