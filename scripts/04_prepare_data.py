@@ -77,8 +77,9 @@ for name, rows in [("train", train_final), ("valid", valid), ("test", test)]:
         for d in rows:
             f.write(json.dumps(d) + "\n")
 
-# Auto-size iters (≈4 passes, clamped) and layers — based on augmented train size
-iters  = min(max(len(train_final) * 4, 100), 800)
+# Auto-size iters — target ~4 epochs at batch_size=2 (1 epoch = train_size/2 iters).
+# Cap at 3200 to prevent runaway on very large sets.
+iters  = min(max(len(train_final) * 2, 100), 3200)
 layers = 4 if n < 100 else 8
 with open("train_params.env", "w") as f:
     f.write(f"ITERS={iters}\nLAYERS={layers}\n")
