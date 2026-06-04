@@ -9,14 +9,15 @@ num_layers: 8                 # auto-adjusted down to 4 for tiny datasets
 # typical 5e-6 to 5e-5, 2e-5 effective across models)
 learning_rate: 2.0e-5
 
-batch_size: 4
+batch_size: 2
 val_batches: 10
 steps_per_eval: 50
 steps_per_report: 10
 save_every: 100
-max_seq_length: 2048
+max_seq_length: 512
+grad_checkpoint: true
 
 lora_parameters:
-  rank: 8
+  rank: 4
   scale: 20.0
   dropout: 0.05               # small dropout = extra regularization on small data

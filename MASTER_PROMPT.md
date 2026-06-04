@@ -41,6 +41,9 @@ KEY DESIGN DECISIONS (do not regress):
 - `test.jsonl` is held out from training and used only by `benchmark.py`.
 - Use `python3 -m mlx_lm generate` (space, not dot) — `mlx_lm.generate` is deprecated.
 - `configs/config.env` is gitignored — never commit it. Copy from `configs/config.env.example`.
+- **`MLX_METAL_MEMORY_LIMIT=0.75`** must be exported before `mlx_lm.lora` on 18GB — without it, Metal may grab all memory and crash silently at low iter counts.
+- **`graph_builder.py` supports Python (AST), Go (regex), JS/TS (regex).** Rebuild graph when repo language mix changes.
+- **`sudo purge` must be non-interactive** (`sudo -n purge 2>/dev/null || true`) — a password prompt hangs background training jobs silently.
 
 ═══════════════════════════════════════════════════════════
 ## PHASE 0 — Preflight Checks
@@ -96,7 +99,7 @@ echo "Found $TOTAL code files"
 [ "$TOTAL" -eq 0 ] && { echo "❌ No code files found"; exit 1; }
 
 AGENTS=$(( (TOTAL + 14) / 15 ))
-[ "$AGENTS" -gt 6 ] && AGENTS=6
+[ "$AGENTS" -gt 2 ] && AGENTS=2  # keep low to avoid OOM during parallel agent runs
 [ "$AGENTS" -lt 1 ] && AGENTS=1
 echo "Using $AGENTS parallel agents"
 
@@ -207,7 +210,7 @@ with open("data/valid.jsonl","w") as f:
 with open("data/test.jsonl","w") as f:
     for d in pairs[tr+va:]: f.write(json.dumps(d)+"\n")
 
-iters  = min(max(n * 4, 100), 800)
+iters  = min(max(n * 2, 100), 3200)  # ~4 epochs at batch_size=2; cap prevents runaway
 layers = 4 if n < 100 else 8
 with open("train_params.env","w") as f:
     f.write(f"ITERS={iters}\nLAYERS={layers}\n")
@@ -240,6 +243,11 @@ source ~/finetune-env/bin/activate
 cd ~/finetune-workspace
 source train_params.env
 
+# Memory safety — critical on 18GB; set Metal memory limit before any MLX code runs
+export MLX_METAL_MEMORY_LIMIT=0.75
+# Free OS file cache (run manually if you have sudo; non-fatal if skipped)
+sudo -n purge 2>/dev/null || true
+
 # Auto batch_size: leave ~40% headroom for OS/GPU/other apps
 BATCH=$(python3 -c "
 import subprocess
@@ -256,6 +264,10 @@ tmpl, iters, layers, batch = sys.argv[1:]
 cfg = open(tmpl).read()
 cfg = re.sub(r'num_layers:.*', f'num_layers: {layers}', cfg, count=1)
 cfg = re.sub(r'batch_size:.*', f'batch_size: {batch}', cfg, count=1)
+# Stable settings for 18GB: shorter sequences + gradient checkpointing prevent OOM
+cfg = re.sub(r'max_seq_length:.*', 'max_seq_length: 512', cfg, count=1)
+if 'grad_checkpoint' not in cfg:
+    cfg += "grad_checkpoint: true\n"
 cfg += f"\niters: {iters}\nmodel: ./base-model\ndata: ./data\nadapter_path: ./adapters\ntrain: true\n"
 open("runtime_lora.yaml","w").write(cfg)
 PYEOF

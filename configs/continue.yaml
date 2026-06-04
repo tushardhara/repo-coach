@@ -12,7 +12,7 @@ models:
       - chat
     autocompleteOptions:
       debounceDelay: 250
-      maxPromptTokens: 1024
+      maxPromptTokens: 512
 context:
   - provider: code
   - provider: codebase

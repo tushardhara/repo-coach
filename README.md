@@ -22,7 +22,7 @@ RepoCoach turns `Qwen2.5-Coder-1.5B` into a private, repo-aware coding assistant
 
 | Requirement | Notes |
 |---|---|
-| Mac with Apple Silicon (M1–M5) | 16GB+ unified memory recommended |
+| Mac with Apple Silicon (M1–M5) | 18GB+ unified memory recommended (16GB minimum) |
 | [Claude Code](https://claude.com/claude-code) | Generates the training dataset |
 | Python 3.10+ | Auto-installed if missing |
 | ~10GB free disk | For model + dataset |
@@ -86,11 +86,12 @@ cp configs/config.env.example configs/config.env
 
 ```bash
 REPO_URL="https://github.com/you/your-project.git"
-PAIRS_PER_FILE=6          # training examples per source file
-CAVEMAN_MODE=false        # set true for 🦴 caveman explanations
+PAIRS_PER_FILE=6              # training examples per source file
+CAVEMAN_MODE=false            # set true for 🦴 caveman explanations
 BASE_MODEL="Qwen/Qwen2.5-Coder-1.5B-Instruct"
-MAX_AGENTS=6              # max parallel Claude Code agents
-QUANT_BITS=4              # quantization for Ollama export
+MAX_AGENTS=2                  # max parallel Claude Code agents (keep low to avoid OOM)
+QUANT_BITS=4                  # quantization for Ollama export
+MLX_METAL_MEMORY_LIMIT=0.75   # fraction of unified memory for MLX (0.75 = safe on 18GB)
 ```
 
 ---
@@ -107,7 +108,7 @@ python3 scripts/graph_builder.py --repo ~/your-repo --out ~/finetune-workspace/g
 python3 scripts/graph_builder.py --query "how does auth work"
 ```
 
-The graph is Python-only (AST extraction). v2 todo: `all-MiniLM-L6-v2` embeddings for semantic search.
+Supports **Python** (AST), **Go** (regex), and **JS/TS/JSX/TSX** (regex). v2 todo: `all-MiniLM-L6-v2` embeddings for semantic search.
 
 ---
 

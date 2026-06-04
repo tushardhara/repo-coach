@@ -5,6 +5,9 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 source ~/finetune-env/bin/activate
 cd ~/finetune-workspace
 source train_params.env
+source "$HERE/configs/config.env"
+export MLX_METAL_MEMORY_LIMIT
+sudo -n purge 2>/dev/null || true  # non-interactive: skips if no cached sudo creds
 
 # Build a runtime config from the template, injecting auto-sized values
 python3 - "$HERE/configs/lora_config.yaml" "$ITERS" "$LAYERS" << 'PYEOF'
@@ -32,5 +35,8 @@ open("runtime_lora.yaml","w").write(cfg)
 print("Wrote runtime_lora.yaml (iters=%s layers=%s batch=%s)" % (iters, layers, batch))
 PYEOF
 
-echo "Starting fine-tune via YAML config..."
-mlx_lm.lora --config runtime_lora.yaml
+echo "Starting fine-tune via YAML config (early stopping: patience=3 evals)..."
+python3 "$HERE/scripts/train_early_stop.py" \
+  --config runtime_lora.yaml \
+  --patience 5 \
+  --save-every 100

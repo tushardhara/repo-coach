@@ -50,8 +50,12 @@ graph_builder.py  → standalone RAG graph tool:
 7. **Held-out `test.jsonl`** powers the benchmark — never merge it back into training.
 8. **`mlx_lm generate`** (space, not dot) — `mlx_lm.generate` is deprecated in mlx-lm 0.22+.
 9. **Fine-tuning teaches patterns, not recall.** For "know my latest code" use retrieval (Continue.dev `@codebase`), not retraining.
-10. **`graph_builder.py` is Python-only + keyword RAG.** AST-based, no regex for other languages. v2 TODO: `all-MiniLM-L6-v2` embeddings (~80MB, runs locally).
+10. **`graph_builder.py` supports Python (AST), Go (regex), JS/TS/JSX/TSX (regex).** Skips `.pb.go` generated files. v2 TODO: `all-MiniLM-L6-v2` embeddings (~80MB, runs locally).
 11. **`configs/config.env` is gitignored.** Contains private repo URL — NEVER commit. Use `configs/config.env.example` as the template.
+12. **`MLX_METAL_MEMORY_LIMIT=0.75`** must be exported before training on 18GB. Set in `config.env`, exported by `06_train.sh`. Prevents Metal OOM that kills the process silently at low iter counts.
+13. **`sudo purge` must not block training.** Use `sudo -n purge 2>/dev/null || true` — non-interactive. Or run manually before starting. Without `-n`, a password prompt hangs background jobs silently.
+14. **Iter formula: `min(max(train_size * 2, 100), 3200)`** targets ~4 epochs at batch_size=2. Old formula (`n*4, cap 800`) was both under-iterating large sets and producing wrong iter counts.
+15. **Graph augmentation trains on context-injected pairs.** For each training pair where `query_graph()` returns context, a duplicate with context prepended is added to train only. Val/test stay clean to avoid data leakage.
 
 ---
 
@@ -64,6 +68,13 @@ Python:     3.13.5
 ollama:     0.5.11
 claude CLI: 2.1.150
 Hardware:   MacBook Pro, Apple M3 Pro, 18GB
+
+Stable training config (18GB):
+  max_seq_length: 512
+  batch_size:     2
+  rank:           4
+  grad_checkpoint: true
+  MLX_METAL_MEMORY_LIMIT: 0.75
 ```
 
 ---
@@ -77,12 +88,13 @@ Hardware:   MacBook Pro, Apple M3 Pro, 18GB
 
 **Benchmark history:**
 
-| Date | Base | Fine-tuned | Fine-tuned+Graph | Haiku | Verdict |
-|---|---|---|---|---|---|
-| 2026-06-04 11:28 | 1.4 | 1.47 | — | 1.73 | USEFUL |
-| 2026-06-04 11:59 | 1.4 | 1.40 | — | 2.47 | NOT YET |
+| Date | Dataset | Base | Fine-tuned | FT+Graph | Haiku | Verdict |
+|---|---|---|---|---|---|---|
+| 2026-06-04 | Flask (public, 495 pairs) | 1.4 | 1.47 | — | 1.73 | expected no gain |
+| 2026-06-04 | Promotions (private, 800 iters, 668 pairs) | 5.3 | 7.1 | — | 9.0 | USEFUL |
+| pending | Promotions+graph-aug (2138 iters, 1069 pairs) | — | — | — | — | in progress |
 
-Expected: fine-tuning on a public library the base model already knows shows no gain. **Private repo will show real delta.**
+Flask showed no gain (base model already knows Flask). Promotions FT (5.3→7.1) confirms private repo fine-tuning works. Graph-augmented run at 2138 iters targets ≥7.5.
 
 ---
 

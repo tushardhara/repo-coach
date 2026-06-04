@@ -21,6 +21,14 @@ from graph_builder import query_graph
 WS = os.path.expanduser("~/finetune-workspace")
 os.chdir(WS)
 
+LOG = os.path.join(WS, "benchmark_progress.log")
+
+def log(msg):
+    line = f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}"
+    print(line, flush=True)
+    with open(LOG, "a") as f:
+        f.write(line + "\n")
+
 TEST = "data/test.jsonl"
 if not os.path.exists(TEST):
     raise SystemExit("No data/test.jsonl — run 04_prepare_data.py first.")
@@ -29,21 +37,31 @@ GRAPH_PATH = "graph.json"
 graph = None
 if os.path.exists(GRAPH_PATH):
     graph = json.load(open(GRAPH_PATH))
-    print(f"Graph loaded: {graph['stats']['files']} files, {graph['stats']['functions']} fns")
+    log(f"Graph loaded: {graph['stats']['files']} files, {graph['stats']['functions']} fns")
 
 items = [json.loads(l) for l in open(TEST) if l.strip()]
-# cap for cost/time; held-out questions only
-items = items[:15]
-print(f"Benchmarking on {len(items)} held-out questions...\n")
+items = items[:5]
+log(f"Starting benchmark on {len(items)} held-out questions...")
+open(LOG, "a").write("=" * 56 + "\n")
 
 
 def mlx_answer(model_path, prompt):
+    # Apply Qwen2.5-Instruct chat template — without it, instruct models ignore the prompt
+    formatted = (
+        f"<|im_start|>system\nYou are a helpful coding assistant.<|im_end|>\n"
+        f"<|im_start|>user\n{prompt}<|im_end|>\n"
+        f"<|im_start|>assistant\n"
+    )
     try:
         r = subprocess.run(
             ["python3", "-m", "mlx_lm", "generate", "--model", model_path,
-             "--max-tokens", "300", "--prompt", prompt],
+             "--max-tokens", "300", "--repetition-penalty", "1.1", "--prompt", formatted],
             capture_output=True, text=True, timeout=180)
-        return r.stdout.strip()
+        # Strip everything up to and including the prompt echo if present
+        out = r.stdout.strip()
+        if "<|im_start|>assistant" in out:
+            out = out.split("<|im_start|>assistant")[-1].strip()
+        return out
     except Exception as e:
         return f"[error: {e}]"
 
@@ -73,7 +91,10 @@ def judge(question, reference, candidate):
         "Score the candidate 1-5 for correctness and usefulness vs the reference "
         "(5=as good or better, 1=wrong/useless). Reply with ONLY the integer.")
     try:
-        r = subprocess.run(["claude", "-p", prompt, "--output-format", "json"],
+        # Pin judge to Sonnet — never Haiku, which would score itself higher
+        r = subprocess.run(["claude", "-p", prompt,
+                            "--model", "claude-sonnet-4-6",
+                            "--output-format", "json"],
                            capture_output=True, text=True, timeout=120)
         try:
             txt = json.loads(r.stdout)["result"]
@@ -87,27 +108,52 @@ def judge(question, reference, candidate):
     return 0
 
 
+def log_answer(label, answer):
+    sep = "-" * 40
+    with open(LOG, "a") as f:
+        f.write(f"\n  [{label}]\n{sep}\n{answer[:500]}\n{sep}\n")
+
 scores = {"base": [], "finetuned": [], "finetuned_graph": [], "haiku": []}
 for i, it in enumerate(items, 1):
     q   = it["messages"][0]["content"]
     ref = it["messages"][1]["content"]
-    print(f"[{i}/{len(items)}] {q[:60]}...")
+    log(f"\nQ{i}/{len(items)}: {q}")
+    log_answer("REFERENCE", ref)
 
+    log(f"  Q{i} → base model inference...")
     a_base = mlx_answer("./base-model", q)
-    a_ft   = mlx_answer("./my-coder-model", q)
-    a_hk   = haiku_answer(q)
+    log_answer("BASE", a_base)
+    s_base = judge(q, ref, a_base)
+    scores["base"].append(s_base)
+    log(f"  Q{i} → base score: {s_base}")
 
-    scores["base"].append(judge(q, ref, a_base))
-    scores["finetuned"].append(judge(q, ref, a_ft))
-    scores["haiku"].append(judge(q, ref, a_hk))
+    log(f"  Q{i} → fine-tuned model inference...")
+    a_ft = mlx_answer("./my-coder-model", q)
+    log_answer("FINE-TUNED", a_ft)
+    s_ft = judge(q, ref, a_ft)
+    scores["finetuned"].append(s_ft)
+    log(f"  Q{i} → finetuned score: {s_ft}")
+
+    log(f"  Q{i} → Haiku inference...")
+    a_hk = haiku_answer(q)
+    log_answer("HAIKU", a_hk)
+    s_hk = judge(q, ref, a_hk)
+    scores["haiku"].append(s_hk)
+    log(f"  Q{i} → haiku score: {s_hk}")
 
     if graph:
+        log(f"  Q{i} → fine-tuned+graph inference...")
         ctx = query_graph(q, graph)
         q_with_ctx = f"{ctx}\n\n{q}" if ctx else q
         a_ft_graph = mlx_answer("./my-coder-model", q_with_ctx)
-        scores["finetuned_graph"].append(judge(q, ref, a_ft_graph))
+        log_answer("FINE-TUNED+GRAPH", a_ft_graph)
+        s_ftg = judge(q, ref, a_ft_graph)
+        scores["finetuned_graph"].append(s_ftg)
+        log(f"  Q{i} → finetuned+graph score: {s_ftg}")
     else:
         scores["finetuned_graph"].append(0)
+
+    log(f"Q{i} done → base={s_base} ft={s_ft} haiku={s_hk}")
 
 
 def avg(xs):
@@ -121,18 +167,18 @@ wins_vs_base  = sum(1 for x, y in zip(scores["finetuned"], scores["base"])  if x
 wins_vs_haiku = sum(1 for x, y in zip(scores["finetuned"], scores["haiku"]) if x >= y)
 total = len(items)
 
-print("\n" + "=" * 56)
-print("RESULTS (avg score 1-5, higher is better)")
-print("=" * 56)
-print(f"  Base Qwen (no FT)    : {b}")
-print(f"  Fine-tuned           : {f}   {'✅' if f > b else '⚠️'} vs base")
+log("\n" + "=" * 56)
+log("RESULTS (avg score 1-5, higher is better)")
+log("=" * 56)
+log(f"  Base Qwen (no FT)    : {b}")
+log(f"  Fine-tuned           : {f}   {'✅' if f > b else '⚠️'} vs base")
 if graph and fg is not None:
-    print(f"  Fine-tuned + graph   : {fg}  {'✅' if fg > f else '⚠️'} vs ft alone")
-print(f"  Claude Haiku         : {h}")
-print("-" * 56)
-print(f"  Fine-tuned beats base  : {wins_vs_base}/{total}")
-print(f"  Fine-tuned ≥ Haiku     : {wins_vs_haiku}/{total}")
-print("=" * 56)
+    log(f"  Fine-tuned + graph   : {fg}  {'✅' if fg > f else '⚠️'} vs ft alone")
+log(f"  Claude Haiku         : {h}")
+log("-" * 56)
+log(f"  Fine-tuned beats base  : {wins_vs_base}/{total}")
+log(f"  Fine-tuned ≥ Haiku     : {wins_vs_haiku}/{total}")
+log("=" * 56)
 
 best_ft = fg if (graph and fg and fg > f) else f
 if best_ft > b and best_ft >= h * 0.9:
@@ -141,14 +187,14 @@ elif best_ft > b:
     verdict = "USEFUL — beats base, but Haiku still leads. Good for cheap/offline tasks."
 else:
     verdict = "NOT YET — fine-tuning isn't beating base. Add data/diversity or reconsider."
-print("VERDICT:", verdict)
+log(f"VERDICT: {verdict}")
 
-with open("benchmark_history.log", "a") as log:
-    log.write(json.dumps({
+with open("benchmark_history.log", "a") as fh:
+    fh.write(json.dumps({
         "ts": datetime.datetime.now().isoformat(timespec="seconds"),
         "n": total, "base": b, "finetuned": f,
         "finetuned_graph": fg, "haiku": h,
         "wins_vs_base": wins_vs_base, "wins_vs_haiku": wins_vs_haiku,
         "verdict": verdict
     }) + "\n")
-print("\nAppended to benchmark_history.log")
+log("Appended to benchmark_history.log")
