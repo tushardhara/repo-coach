@@ -10,6 +10,7 @@ echo ""
 
 bash    "$HERE/scripts/00_preflight.sh"
 bash    "$HERE/scripts/01_install.sh"
+source  ~/finetune-env/bin/activate
 bash    "$HERE/scripts/02_partition.sh"
 bash    "$HERE/scripts/03_agents.sh"
 python3 "$HERE/scripts/04_prepare_data.py"

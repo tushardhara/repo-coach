@@ -2,18 +2,18 @@
 """
 graph_builder.py — RAG-ready codebase graph for RepoCoach
 
-Builds a knowledge graph from the target repo (Python files only, AST-based).
+Builds a knowledge graph from the target repo (Python AST + Go/JS regex).
 Nodes = files with functions/classes/imports. Edges = local import relationships.
 
 Usage:
   # Build
-  python3 scripts/graph_builder.py --repo ~/flask --out ~/finetune-workspace/graph.json
+  python3 scripts/graph_builder.py --repo ~/Promotions --out ~/finetune-workspace/graph.json
 
   # Query (returns context string for prompt injection)
   python3 scripts/graph_builder.py --query "how does session handling work"
 
   # Query with custom graph path
-  python3 scripts/graph_builder.py --query "SecureCookieSession" --graph ~/finetune-workspace/graph.json
+  python3 scripts/graph_builder.py --query "IngestToRedis" --graph ~/finetune-workspace/graph.json
 
 v1: keyword search. v2 todo: embeddings (all-MiniLM-L6-v2, ~80MB, runs locally).
 """
@@ -72,6 +72,80 @@ def extract_file(path: str, rel: str) -> dict | None:
     }
 
 
+def extract_go_file(path: str, rel: str) -> dict | None:
+    try:
+        src = open(path, errors='ignore').read()
+    except Exception:
+        return None
+
+    functions, classes, imports = [], [], []
+
+    # Functions: func (recv *Type) Name(params) ReturnType
+    for m in re.finditer(r'^func\s+(?:\([^)]*\)\s+)?(\w+)\s*(\([^)]*\))', src, re.MULTILINE):
+        functions.append({
+            'name': m.group(1),
+            'signature': m.group(0)[:120].replace('\n', ' '),
+            'docstring': '',
+            'line': src[:m.start()].count('\n') + 1,
+        })
+
+    # Structs and interfaces
+    for m in re.finditer(r'^type\s+(\w+)\s+(struct|interface)\b', src, re.MULTILINE):
+        classes.append({'name': m.group(1), 'bases': [m.group(2)], 'docstring': ''})
+
+    # Imports: single-line and block
+    for m in re.finditer(r'^import\s+"([^"]+)"', src, re.MULTILINE):
+        imports.append(m.group(1).split('/')[-1])
+    for m in re.finditer(r'^import\s*\(([^)]+)\)', src, re.MULTILINE | re.DOTALL):
+        for pkg in re.findall(r'"([^"]+)"', m.group(1)):
+            imports.append(pkg.split('/')[-1])
+
+    if not functions and not classes:
+        return None
+    return {
+        'id': f"file:{rel}",
+        'path': rel,
+        'functions': functions[:50],
+        'classes': classes[:20],
+        'imports': list(dict.fromkeys(imports))[:30],
+    }
+
+
+def extract_js_file(path: str, rel: str) -> dict | None:
+    try:
+        src = open(path, errors='ignore').read()
+    except Exception:
+        return None
+
+    functions, classes, imports = [], [], []
+
+    # Named functions and arrow functions assigned to const/let
+    for m in re.finditer(r'^(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*(\([^)]*\))', src, re.MULTILINE):
+        functions.append({'name': m.group(1), 'signature': m.group(0)[:120], 'docstring': '', 'line': src[:m.start()].count('\n') + 1})
+    for m in re.finditer(r'^(?:export\s+)?(?:const|let)\s+(\w+)\s*=\s*(?:async\s*)?\(', src, re.MULTILINE):
+        functions.append({'name': m.group(1), 'signature': m.group(0)[:80], 'docstring': '', 'line': src[:m.start()].count('\n') + 1})
+
+    # Classes
+    for m in re.finditer(r'^(?:export\s+)?class\s+(\w+)', src, re.MULTILINE):
+        classes.append({'name': m.group(1), 'bases': [], 'docstring': ''})
+
+    # Imports: require / ES import
+    for m in re.finditer(r"require\(['\"]([^'\"]+)['\"]\)", src):
+        imports.append(m.group(1).split('/')[-1])
+    for m in re.finditer(r"^import\s+.*?from\s+['\"]([^'\"]+)['\"]", src, re.MULTILINE):
+        imports.append(m.group(1).split('/')[-1])
+
+    if not functions and not classes:
+        return None
+    return {
+        'id': f"file:{rel}",
+        'path': rel,
+        'functions': functions[:50],
+        'classes': classes[:20],
+        'imports': list(dict.fromkeys(imports))[:30],
+    }
+
+
 def build_graph(repo_path: str) -> dict:
     repo = Path(repo_path).resolve()
     nodes = []
@@ -79,11 +153,16 @@ def build_graph(repo_path: str) -> dict:
     for root, dirs, files in os.walk(repo):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for fname in files:
-            if not fname.endswith('.py'):
-                continue
             full = os.path.join(root, fname)
-            rel = os.path.relpath(full, repo)
-            node = extract_file(full, rel)
+            rel  = os.path.relpath(full, repo)
+            if fname.endswith('.py'):
+                node = extract_file(full, rel)
+            elif fname.endswith('.go') and not fname.endswith('.pb.go'):
+                node = extract_go_file(full, rel)
+            elif fname.endswith(('.js', '.ts', '.jsx', '.tsx')):
+                node = extract_js_file(full, rel)
+            else:
+                continue
             if node:
                 nodes.append(node)
 
