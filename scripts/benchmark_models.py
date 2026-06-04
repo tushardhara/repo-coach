@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""
+Graph-Context Benchmark — does the Knowledge Graph improve Claude model tiers?
+
+Matrix (6 Claude configs + 1 agent):
+  haiku   | no-graph  vs  with-graph
+  sonnet  | no-graph  vs  with-graph
+  opus    | no-graph  vs  with-graph
+  repo-coach agent (Qwen + tool-calling)
+
+Usage:
+    python3 scripts/benchmark_models.py [--n 5] [--repo ~/Promotions]
+
+Judge: claude-sonnet-4-6 (pinned, never the candidate itself)
+"""
+import argparse
+import datetime
+import json
+import os
+import statistics
+import subprocess
+import sys
+
+# Make repo_coach importable
+REPO_COACH_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_COACH_ROOT)
+
+WS = os.path.expanduser("~/finetune-workspace")
+LOG = os.path.join(WS, "benchmark_models_progress.log")
+HISTORY = os.path.join(WS, "benchmark_models_history.log")
+TEST = os.path.join(WS, "data/test.jsonl")
+
+DEFAULT_REPO = os.path.expanduser("~/Promotions")
+DEFAULT_N = 5
+
+CLAUDE_MODELS = {
+    "haiku":  "claude-haiku-4-5-20251001",
+    "sonnet": "claude-sonnet-4-6",
+    "opus":   "claude-opus-4-7",
+}
+JUDGE_MODEL = "claude-sonnet-4-6"
+
+
+def log(msg):
+    line = f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}"
+    print(line, flush=True)
+    with open(LOG, "a") as f:
+        f.write(line + "\n")
+
+
+# ── Graph evidence extraction ─────────────────────────────────────────────────
+
+def extract_graph_evidence(graph, question: str) -> str:
+    """Run the planner + first tool + evidence packer. Returns evidence string."""
+    from core.navigator.planner import classify_question, suggest_first_tool
+    from core.navigator.evidence_packer import (
+        pack_flow_evidence, pack_impact_evidence,
+        pack_table_evidence, pack_symbol_evidence,
+    )
+
+    strategy = classify_question(question)
+    first_tool, first_args = suggest_first_tool(question, strategy)
+
+    try:
+        result_json = graph.dispatch_tool(first_tool, first_args)
+        result = json.loads(result_json)
+    except Exception as e:
+        return f"[graph error: {e}]"
+
+    if strategy == "flow":
+        if isinstance(result, list) and result:
+            handler_id = next(
+                (r.get("handler_id", "") for r in result
+                 if r.get("handler_id") and not _is_setup(r.get("handler_id", ""))),
+                ""
+            )
+            if not handler_id:
+                keyword = question.split()[0] if question.split() else "main"
+                syms = json.loads(graph.dispatch_tool("find_symbols", {"query": keyword}))
+                handler_id = syms[0].get("id", "") if syms else ""
+            if handler_id:
+                try:
+                    flow = json.loads(graph.dispatch_tool("build_flow", {"entrypoint_id": handler_id}))
+                    if "error" not in flow:
+                        return pack_flow_evidence(question, flow, {}, {})
+                except Exception:
+                    pass
+        return json.dumps(result)[:800]
+    elif strategy == "impact":
+        if isinstance(result, list) and result:
+            sym_id = result[0].get("id", "")
+            impact = json.loads(graph.dispatch_tool("build_impact", {"symbol_id": sym_id}))
+            return pack_impact_evidence(question, impact)
+        return json.dumps(result)[:800]
+    elif strategy == "table":
+        return pack_table_evidence(question, result if isinstance(result, dict) else {"raw": result})
+    else:
+        sym = result[0] if isinstance(result, list) and result else (result if isinstance(result, dict) else {})
+        sym_id = sym.get("id", "")
+        callees = json.loads(graph.dispatch_tool("get_callees", {"symbol_id": sym_id})) if sym_id else []
+        callers = json.loads(graph.dispatch_tool("get_callers", {"symbol_id": sym_id})) if sym_id else []
+        facts_raw = json.loads(graph.dispatch_tool("get_facts", {"symbol_id": sym_id})) if sym_id else []
+        return pack_symbol_evidence(question, sym, callees, callers, facts_raw)
+
+
+_SETUP_NAMES = {"setup", "init", "main", "register", "routes", "router"}
+
+def _is_setup(handler_id: str) -> bool:
+    name = handler_id.split(":")[-1].lower()
+    return any(w in name for w in _SETUP_NAMES)
+
+
+def build_prompt_with_graph(question: str, evidence: str) -> str:
+    return (
+        f"You are a senior engineer answering questions about a codebase.\n"
+        f"Use ONLY the evidence below — do not guess.\n\n"
+        f"EVIDENCE:\n{evidence}\n\n"
+        f"QUESTION: {question}"
+    )
+
+
+# ── Claude answer ─────────────────────────────────────────────────────────────
+
+def claude_answer(model_id: str, prompt: str) -> str:
+    try:
+        r = subprocess.run(
+            ["claude", "-p", prompt, "--model", model_id, "--output-format", "json"],
+            capture_output=True, text=True, timeout=180,
+        )
+        try:
+            return json.loads(r.stdout)["result"].strip()
+        except Exception:
+            return r.stdout.strip()
+    except subprocess.TimeoutExpired:
+        return "[error: timeout]"
+    except Exception as e:
+        return f"[error: {e}]"
+
+
+# ── Agent answer (repo-coach ask) ─────────────────────────────────────────────
+
+def agent_answer(question: str, repo: str) -> str:
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "core.cli.main", "ask", question, "--repo", repo],
+            capture_output=True, text=True, timeout=120,
+            cwd=REPO_COACH_ROOT,
+        )
+        out = r.stdout.strip()
+        return out or f"[error: {r.stderr.strip()[:200]}]"
+    except subprocess.TimeoutExpired:
+        return "[error: timeout]"
+    except Exception as e:
+        return f"[error: {e}]"
+
+
+# ── Judge ─────────────────────────────────────────────────────────────────────
+
+def judge(question: str, reference: str, candidate: str) -> int:
+    if not candidate or candidate.startswith("[error"):
+        return 0
+    prompt = (
+        "You are grading a coding assistant's answer.\n"
+        f"QUESTION: {question}\n\n"
+        f"REFERENCE (ideal) ANSWER: {reference}\n\n"
+        f"CANDIDATE ANSWER: {candidate}\n\n"
+        "Score the candidate 1-5 for correctness and usefulness vs the reference "
+        "(5=as good or better, 1=wrong/useless). Reply with ONLY the integer."
+    )
+    try:
+        r = subprocess.run(
+            ["claude", "-p", prompt, "--model", JUDGE_MODEL, "--output-format", "json"],
+            capture_output=True, text=True, timeout=120,
+        )
+        try:
+            txt = json.loads(r.stdout)["result"]
+        except Exception:
+            txt = r.stdout
+        for tok in txt.split():
+            if tok.strip().isdigit():
+                return max(1, min(5, int(tok.strip())))
+    except Exception:
+        pass
+    return 0
+
+
+def avg(xs):
+    xs = [x for x in xs if x > 0]
+    return round(statistics.mean(xs), 2) if xs else 0.0
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n", type=int, default=DEFAULT_N)
+    parser.add_argument("--repo", default=DEFAULT_REPO)
+    parser.add_argument("--skip-agent", action="store_true", help="Skip slow Qwen agent")
+    args = parser.parse_args()
+
+    repo = os.path.expanduser(args.repo)
+    if not os.path.exists(os.path.join(repo, ".repo-coach", "manifest.json")):
+        raise SystemExit(f"No index at {repo}/.repo-coach/ — run: repo-coach build {repo}")
+    if not os.path.exists(TEST):
+        raise SystemExit(f"No test data at {TEST}")
+
+    # Load graph once
+    from core.navigator.graph_tools import GraphStore
+    graph = GraphStore(repo)
+    log(f"Graph loaded: {len(graph.symbols)} symbols, {len(graph.relations)} relations")
+
+    # Check Ollama
+    ollama_ok = False
+    if not args.skip_agent:
+        try:
+            r = subprocess.run(["curl", "-sf", "http://localhost:11434/api/tags"],
+                               capture_output=True, text=True, timeout=5)
+            ollama_ok = r.returncode == 0
+        except Exception:
+            pass
+    log(f"Ollama: {'UP' if ollama_ok else 'DOWN (agent skipped)'}")
+
+    items = [json.loads(l) for l in open(TEST) if l.strip()][:args.n]
+    log(f"Benchmarking {len(items)} questions | repo={repo}")
+    open(LOG, "a").write("=" * 70 + "\n")
+
+    # score lists: key → list of ints
+    configs = [
+        ("haiku_raw",    "Haiku    no-graph"),
+        ("haiku_graph",  "Haiku  with-graph"),
+        ("sonnet_raw",   "Sonnet   no-graph"),
+        ("sonnet_graph", "Sonnet with-graph"),
+        ("opus_raw",     "Opus     no-graph"),
+        ("opus_graph",   "Opus   with-graph"),
+    ]
+    if ollama_ok:
+        configs.append(("agent", "Agent (Qwen tool-call)"))
+
+    scores = {k: [] for k, _ in configs}
+
+    for i, it in enumerate(items, 1):
+        q   = it["messages"][0]["content"]
+        ref = it["messages"][1]["content"]
+        log(f"\nQ{i}/{len(items)}: {q[:80]}")
+
+        # Extract graph evidence once per question
+        log(f"  Q{i} → extracting graph evidence...")
+        evidence = extract_graph_evidence(graph, q)
+        log(f"  Q{i} → evidence: {len(evidence)} chars | strategy hint in first 60: {evidence[:60]!r}")
+
+        prompt_raw   = q
+        prompt_graph = build_prompt_with_graph(q, evidence)
+
+        for model_key, model_id in CLAUDE_MODELS.items():
+            # raw
+            key_raw = f"{model_key}_raw"
+            log(f"  Q{i} → {key_raw}...")
+            a = claude_answer(model_id, prompt_raw)
+            s = judge(q, ref, a)
+            scores[key_raw].append(s)
+            log(f"  Q{i} → {key_raw}: {s}")
+
+            # with graph
+            key_graph = f"{model_key}_graph"
+            log(f"  Q{i} → {key_graph}...")
+            a = claude_answer(model_id, prompt_graph)
+            s = judge(q, ref, a)
+            scores[key_graph].append(s)
+            log(f"  Q{i} → {key_graph}: {s}")
+
+        if ollama_ok:
+            log(f"  Q{i} → agent...")
+            a = agent_answer(q, repo)
+            s = judge(q, ref, a)
+            scores["agent"].append(s)
+            log(f"  Q{i} → agent: {s}")
+
+    # ── Results table ─────────────────────────────────────────────────────────
+    log("\n" + "=" * 70)
+    log(f"{'CONFIG':<28} {'AVG':>6}  {'SCORES'}")
+    log("=" * 70)
+
+    results = {}
+    for key, label in configs:
+        if key not in scores:
+            continue
+        a = avg(scores[key])
+        results[key] = a
+        per_q = "  ".join(str(s) for s in scores[key])
+        log(f"  {label:<26} {a:>6}  [{per_q}]")
+
+    log("-" * 70)
+
+    # Graph delta per tier
+    for tier in ("haiku", "sonnet", "opus"):
+        raw = results.get(f"{tier}_raw", 0)
+        gph = results.get(f"{tier}_graph", 0)
+        delta = round(gph - raw, 2)
+        sign = "+" if delta >= 0 else ""
+        log(f"  Graph delta ({tier:6}): {sign}{delta}")
+
+    log("=" * 70)
+
+    # Append history
+    record = {
+        "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+        "n": len(items), "repo": repo,
+        **{k: avg(v) for k, v in scores.items()},
+    }
+    with open(HISTORY, "a") as fh:
+        fh.write(json.dumps(record) + "\n")
+    log(f"Appended to {HISTORY}")
+
+
+if __name__ == "__main__":
+    main()

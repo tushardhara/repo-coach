@@ -17,8 +17,20 @@ finetune-env/
 # OS
 .DS_Store
 
+# Trash (deleted files kept locally for safety)
+.trash/
+
 # Private config (contains company repo URL — never commit)
 configs/config.env
 
 # Claude Code local state
 .claude/
+
+# RepoCoach v2 index output
+.repo-coach/
+.understand-anything/
+knowledge-graph.json
+fingerprints.json
+meta.json
+config.json
+graph.json

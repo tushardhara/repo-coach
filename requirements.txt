@@ -1,6 +1,6 @@
-# Pinned for reproducibility. Update deliberately, not accidentally.
-mlx-lm>=0.30.0,<0.31.0
-mlx>=0.20.0
-huggingface_hub>=0.25.0
-transformers>=4.45.0
-datasets>=3.0.0
+# repo-coach uses only Python stdlib — no runtime dependencies.
+# Optional: install tree-sitter for higher-accuracy parsing (not required)
+# tree-sitter>=0.20.0
+# tree-sitter-python>=0.20.0
+# tree-sitter-go>=0.20.0
+# tree-sitter-javascript>=0.20.0

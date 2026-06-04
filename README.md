@@ -1,206 +1,202 @@
-# 🦴 RepoCoach
+# RepoCoach
 
-**Fine-tune a tiny, fast coding model on _your_ GitHub repo — running entirely on your Mac.**
+**A Code Knowledge Agent for your codebase — runs entirely on your Mac.**
 
-RepoCoach turns `Qwen2.5-Coder-1.5B` into a private, repo-aware coding assistant. It uses **Claude Code sub-agents** to auto-generate the training data, fine-tunes locally with **Apple MLX**, and ships the result to **Ollama** so you can use it forever — offline, free, and fast (~150 tokens/sec on Apple Silicon).
+RepoCoach builds a structured Code Knowledge Graph of any repo and lets you query it with natural language. It uses Ollama (local) or Claude (API) to answer questions by traversing the graph — never by guessing or loading the whole repo into context.
 
-> No training API costs. No code leaves your machine. ~45–60 minutes end to end.
-
----
-
-## ✨ What you get
-
-- A `your-repo-coder` model in Ollama that knows your codebase's patterns
-- **GraphRAG hybrid** — AST-based codebase graph prepended to prompts at inference time
-- Optional **caveman mode** 🦴 (explanations in caveman speak, code stays clean)
-- Drop-in **Continue.dev** config for in-editor autocomplete
-- Fully automated pipeline — one command
+> No API costs for indexing. No code leaves your machine. Answers grounded in real structure.
 
 ---
 
-## 📋 Requirements
+## What it does
+
+Ask a question → the agent picks the right navigation tool → traverses the Knowledge Graph → answers only from retrieved evidence.
+
+```
+$ repo-coach ask "How does voucher assignment flow?" --repo ~/my-repo
+
+[tool] find_routes({"query": "assign"})
+[tool] build_flow({"entrypoint_id": "go:function:routes/assign.go:AssignVoucher"})
+
+Answer: AssignVoucher validates the coupon via CheckUniqueVoucherReaderDB,
+writes to external_voucher_codes, then publishes to the assignment queue.
+DB reads: [external_voucher_codes]. DB writes: [voucher_assignments]. Queue: [assign.voucher].
+```
+
+---
+
+## Requirements
 
 | Requirement | Notes |
 |---|---|
-| Mac with Apple Silicon (M1–M5) | 18GB+ unified memory recommended (16GB minimum) |
-| [Claude Code](https://claude.com/claude-code) | Generates the training dataset |
-| Python 3.10+ | Auto-installed if missing |
-| ~10GB free disk | For model + dataset |
+| Mac with Apple Silicon (M1–M5) | 16GB+ unified memory recommended |
+| Python 3.10+ | No pip dependencies — stdlib only |
+| [Ollama](https://ollama.com) | For local Qwen model (`qwen2.5-coder:1.5b`) |
+| [Claude CLI](https://claude.com/claude-code) | Optional — for Haiku/Sonnet/Opus benchmarks |
 
 ---
 
-## 🚀 Quick Start
+## Quick start
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/repo-coach.git
 cd repo-coach
+pip install -e .
 
-# Configure your target repo (configs/config.env is gitignored — safe for private repos)
-cp configs/config.env.example configs/config.env
-# Edit configs/config.env and set REPO_URL="https://github.com/you/your-project.git"
+# Build the Knowledge Graph for your repo
+repo-coach build ~/your-repo
 
-# (Recommended) verify the toolchain first — ~2 min on a tiny dummy dataset
-./scripts/dry_run.sh
-
-# Run the whole pipeline (ends with a benchmark score)
-./scripts/run.sh
-```
-
-The run ends with a **verdict**: whether your fine-tuned model beats base Qwen and Claude Haiku. See [`docs/BENCHMARK.md`](docs/BENCHMARK.md).
-
-When it finishes:
-
-```bash
-ollama run your-project-coder "How does the auth module work?"
+# Ask a question (requires Ollama running)
+ollama serve &
+ollama pull qwen2.5-coder:1.5b
+repo-coach ask "How does the auth flow work?" --repo ~/your-repo
 ```
 
 ---
 
-## 🧠 How it works
+## How it works
 
 ```
 Your repo
    │
-   ├─► graph_builder.py ──────────────────► graph.json (AST RAG index)
-   │                                              │
-   ├─► Claude Code sub-agents (parallel) ──► training dataset (JSONL)
-   │                                              │
-   ├─► Apple MLX LoRA fine-tuning ──► adapter    │
-   │                                              │
-   ├─► fuse ──► standalone model ◄────────────────┘
-   │                 │
-   └─► benchmark.py  └─► Ollama ──► Continue.dev (VS Code autocomplete)
+   └─► repo-coach build    → .repo-coach/ (JSONL Knowledge Graph)
+            │
+            ├── file_index.jsonl    — every source file + language
+            ├── symbols.jsonl       — functions, classes, routes, structs
+            ├── relations.jsonl     — CALLS, IMPORTS, EXPOSES_ROUTE, ...
+            ├── facts.jsonl         — DB reads/writes, Redis, queues, HTTP calls
+            ├── flows.jsonl         — pre-built call chains per route
+            └── manifest.json       — build stats
+                     │
+                     ▼
+            repo-coach ask  →  Ollama Qwen (tool-calling agent loop)
+                                    │
+                     ┌──────────────┴──────────────┐
+                     │  Navigation tools (10 total) │
+                     │  find_symbols  find_routes   │
+                     │  build_flow    build_impact  │
+                     │  search_table  get_callees   │
+                     │  get_callers   get_facts      │
+                     │  get_symbol    get_code       │
+                     └─────────────────────────────-┘
 ```
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full breakdown.
+The agent calls tools in a JSON protocol loop (max 8 calls), accumulates evidence, then writes a grounded answer.
 
 ---
 
-## ⚙️ Configuration
-
-Copy the example and fill in your repo URL (`configs/config.env` is gitignored — never committed):
+## CLI reference
 
 ```bash
-cp configs/config.env.example configs/config.env
-```
+# Build the index (run once, re-run when code changes significantly)
+repo-coach build ~/your-repo
 
-```bash
-REPO_URL="https://github.com/you/your-project.git"
-PAIRS_PER_FILE=6              # training examples per source file
-CAVEMAN_MODE=false            # set true for 🦴 caveman explanations
-BASE_MODEL="Qwen/Qwen2.5-Coder-1.5B-Instruct"
-MAX_AGENTS=2                  # max parallel Claude Code agents (keep low to avoid OOM)
-QUANT_BITS=4                  # quantization for Ollama export
-MLX_METAL_MEMORY_LIMIT=0.75   # fraction of unified memory for MLX (0.75 = safe on 18GB)
+# Ask a natural language question
+repo-coach ask "Who calls CheckUniqueVoucherReaderDB?" --repo ~/your-repo
+
+# Inspect call flow for a route/function
+repo-coach explain "voucher assignment" --repo ~/your-repo
+
+# Impact analysis — what breaks if this function changes?
+repo-coach impact --symbol AssignVoucher --repo ~/your-repo
+
+# DB usage — what reads/writes this table?
+repo-coach table external_voucher_codes --repo ~/your-repo
+
+# Debug — show graph evidence without calling Ollama
+repo-coach debug-context "How does login work?" --repo ~/your-repo
+
+# Verify Ollama tool-calling is working
+repo-coach test-tool-calling --repo ~/your-repo
 ```
 
 ---
 
-## 🗂️ Graph RAG
+## Knowledge Graph
 
-`graph_builder.py` builds an AST-based knowledge graph of your repo and enables retrieval-augmented generation at inference time. `benchmark.py` automatically runs a **fine-tuned + graph** variant if `graph.json` exists in the workspace.
+The graph is built from static analysis — no LLM needed for indexing.
 
-```bash
-# Build graph
-python3 scripts/graph_builder.py --repo ~/your-repo --out ~/finetune-workspace/graph.json
+| Artifact | Contents |
+|---|---|
+| Symbols | Functions, methods, classes, structs, interfaces, routes |
+| Relations | CALLS, IMPORTS, CONTAINS, EXPOSES_ROUTE, IMPLEMENTS |
+| Facts | READS_TABLE, WRITES_TABLE, USES_REDIS, PUBLISHES_QUEUE, CALLS_HTTP |
+| Flows | Pre-built BFS call chains from route handlers (max depth 8) |
 
-# Query it (returns prompt-ready context)
-python3 scripts/graph_builder.py --query "how does auth work"
-```
-
-Supports **Python** (AST), **Go** (regex), and **JS/TS/JSX/TSX** (regex). v2 todo: `all-MiniLM-L6-v2` embeddings for semantic search.
+**Supported languages:** Python (AST), Go (regex), JavaScript/TypeScript (regex).
 
 ---
 
-## 📂 Project structure
+## Benchmark
+
+`scripts/benchmark_models.py` tests the Knowledge Graph as context across Claude model tiers:
+
+```bash
+# Requires: repo-coach build ~/Promotions, claude CLI, ollama running
+python3 scripts/benchmark_models.py --n 5 --repo ~/Promotions
+```
+
+Results on the Promotions codebase (5 questions, judge = claude-sonnet-4-6):
+
+| Config | Avg score (1–5) | Graph delta |
+|---|---|---|
+| Haiku no-graph | 1.6 | — |
+| Haiku + graph | 1.6 | +0.0 |
+| Sonnet no-graph | 1.8 | — |
+| **Sonnet + graph** | **2.6** | **+0.8** |
+| Opus no-graph | 2.6 | — |
+| Opus + graph | 2.4 | −0.2 |
+| Agent (Qwen 1.5B) | 1.6 | — |
+
+**Sonnet + graph wins.** Opus reasons well without graph context; smaller models can't leverage it.
+
+---
+
+## Project structure
 
 ```
 repo-coach/
+├── core/                     # Python package (stdlib only)
+│   ├── cli/                  # CLI commands (main.py, debug_context.py)
+│   ├── graph/                # Schema dataclasses
+│   ├── scanner/              # File walker + language detection
+│   ├── index/                # Build pipeline (builder.py, phase 1–5)
+│   ├── parsers/              # Python (AST), Go, JS/TS (regex)
+│   ├── resolver/             # CALLS + IMPORTS resolution
+│   ├── detectors/            # Routes, SQL, Redis, queues, HTTP, events
+│   ├── navigator/            # Graph tools, agent loop, evidence packer
+│   └── llm/                  # Ollama client + prompts
 ├── scripts/
-│   ├── run.sh                # main orchestrator (phases 0–9)
-│   ├── dry_run.sh            # 2-min toolchain sanity check
-│   ├── retrain.sh            # smart change-aware retrain
-│   ├── install_hook.sh       # post-merge git hook
-│   ├── setup_cron.sh         # weekly cron retrain
-│   ├── 00_preflight.sh
-│   ├── 01_install.sh
-│   ├── 02_partition.sh
-│   ├── 03_agents.sh          # parallel Claude Code dataset generation
-│   ├── 04_prepare_data.py
-│   ├── 05_download.py
-│   ├── 06_train.sh           # MLX LoRA, auto batch_size from RAM
-│   ├── 07_fuse.sh
-│   ├── 08_evaluate.py
-│   ├── 09_export_ollama.sh
-│   ├── benchmark.py          # LLM-judged score: base vs FT vs FT+graph vs Haiku
-│   └── graph_builder.py      # AST graph build + keyword RAG query
-├── configs/
-│   ├── config.env.example    # template — copy to config.env and fill in
-│   ├── config.env            # your settings (gitignored — never committed)
-│   ├── lora_config.yaml      # LoRA hyperparameters
-│   └── continue.yaml         # Continue.dev config template
-├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── BENCHMARK.md
-│   ├── RETRAIN.md
-│   └── TROUBLESHOOTING.md
-├── HANDOFF.md                # context for resuming in a new Claude Code session
-├── MASTER_PROMPT.md          # paste-into-Claude-Code version of the full pipeline
-├── LICENSE
+│   ├── benchmark_agent.py    # repo-coach ask vs Haiku (5 questions)
+│   └── benchmark_models.py   # graph context across Haiku/Sonnet/Opus
+├── setup.py
 └── README.md
 ```
 
 ---
 
-## 🦴 Caveman mode
-
-Set `CAVEMAN_MODE=true` and the model explains code in caveman speak while keeping code correct:
-
-```
-> explain parse_config
-parse_config take file. Read settings. Make dict. Give back. Ugh.
-
-def parse_config(path):
-    with open(path) as f:
-        return json.load(f)
-```
-
----
-
-## 🤝 Contributing
-
-PRs welcome! See [CONTRIBUTING.md](CONTRIBUTING.md). Ideas:
-- Support more base models (DeepSeek-Coder, CodeLlama)
-- Windows/Linux support (CUDA path)
-- VS Code one-click installer
-- `graph_builder.py` v2: semantic embeddings (all-MiniLM-L6-v2)
-
----
-
-## ⚠️ Honest limitations
-
-- A 1.5B model fine-tuned on one repo is **sharp on your code but weaker than Claude/GPT generally**. Use it for fast, small, repo-specific tasks.
-- Fine-tuning teaches *patterns*, not perfect recall. For "what's in file X" use retrieval (`@codebase` in Continue.dev or `graph_builder.py --query`), not fine-tuning.
-- `claude -p` usage on subscription plans draws from a separate Agent SDK credit pool (as of mid-2026). Check your usage.
-
----
-
-## 📄 License
-
-MIT — see [LICENSE](LICENSE).
-
----
-
-## 🔁 Retraining
-
-RepoCoach retrains intelligently — only when your codebase's *patterns* actually change, never blindly on every commit (which would waste compute and cause small-model forgetting).
+## Configuration
 
 ```bash
-./scripts/retrain.sh           # retrain if enough changed
-./scripts/retrain.sh --force   # retrain now
+# Use a different Ollama model
+export REPO_COACH_MODEL=qwen2.5-coder:7b
+repo-coach ask "..." --repo ~/your-repo
 
-./scripts/install_hook.sh      # auto-check after merges to main
-./scripts/setup_cron.sh        # or weekly check
+# Verbose build output
+repo-coach build ~/your-repo --verbose
 ```
 
-See [`docs/RETRAIN.md`](docs/RETRAIN.md) for the full strategy and why incremental-per-commit training is avoided.
+---
+
+## Honest limitations
+
+- **"Why" questions score low** — the graph answers *structure* (how, what, who calls what). Questions about intent and history require reading commit messages or comments, not graph traversal.
+- **Go route aliases** — `Handler = pkg.Func` alias patterns can't be resolved without tree-sitter. The agent falls back to compound keyword search.
+- **Qwen 1.5B tool-calling** — small model sometimes fails to follow the JSON tool-call protocol. Sonnet + graph context (direct, no agent loop) outperforms the agent on hard questions.
+- **Regex parsers** — Go and JS/TS use regex (tree-sitter not installed by default). Accuracy is ~0.7 vs AST's 1.0.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
