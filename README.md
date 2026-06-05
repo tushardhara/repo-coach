@@ -156,26 +156,39 @@ This replaces the old single-keyword extraction that frequently returned the wro
 
 ## Benchmark
 
-`scripts/benchmark_models.py` tests the Knowledge Graph as context across Claude model tiers:
+Two-step process: generate a grounded dataset, then run the matrix benchmark.
 
 ```bash
-# Requires: repo-coach build ~/Promotions, claude CLI, ollama running
-python3 scripts/benchmark_models.py --n 5 --repo ~/Promotions
+# Step 1 — Opus reads actual code and generates factual Q&A pairs
+python3 scripts/create_dataset.py --repo ~/Promotions --n 20
+
+# Step 2 — benchmark all model configs against those questions
+python3 scripts/benchmark_models.py --n 10 --repo ~/Promotions
+
+# Use a custom dataset file
+python3 scripts/benchmark_models.py --dataset ~/my_dataset.jsonl --repo ~/Promotions
 ```
 
-Results on the Promotions codebase (5 questions, judge = claude-sonnet-4-6):
+`create_dataset.py` samples diverse files from the Knowledge Graph by centrality and role,
+reads the actual source code, then asks Opus to write 2–3 factual questions per file with
+reference answers grounded in what the code actually does. This avoids the "garbage in,
+garbage out" problem of using training-pipeline Q&A pairs as eval data.
+
+Results on the Promotions codebase (10 grounded questions, judge = claude-sonnet-4-6):
 
 | Config | Avg score (1–5) | Graph delta |
 |---|---|---|
-| Haiku no-graph | 1.6 | — |
-| Haiku + graph | 1.6 | +0.0 |
-| Sonnet no-graph | 1.8 | — |
-| **Sonnet + graph** | **2.6** | **+0.8** |
-| Opus no-graph | 2.6 | — |
-| Opus + graph | 2.4 | −0.2 |
-| Agent (Qwen 1.5B) | 1.6 | — |
+| Haiku no-graph | 1.9 | — |
+| Haiku + graph | 1.5 | −0.4 |
+| Sonnet no-graph | 1.9 | — |
+| **Sonnet + graph** | **2.3** | **+0.4** |
+| Opus no-graph | 2.5 | — |
+| Opus + graph | 1.1 | −1.4 |
 
-**Sonnet + graph wins.** Opus reasons well without graph context; smaller models can't leverage it.
+**Sonnet + graph wins consistently.** Opus is hurt by thin graph evidence — when the
+evidence packer returns little signal, it overrides Opus's internal reasoning with noise.
+Current bottleneck: graph evidence for general questions averages ~200 chars (near-empty),
+because the "general" strategy routes through `find_files` → symbol context with no code content.
 
 ---
 

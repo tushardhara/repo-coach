@@ -28,7 +28,8 @@ sys.path.insert(0, REPO_COACH_ROOT)
 WS = os.path.expanduser("~/finetune-workspace")
 LOG = os.path.join(WS, "benchmark_models_progress.log")
 HISTORY = os.path.join(WS, "benchmark_models_history.log")
-TEST = os.path.join(WS, "data/test.jsonl")
+DEFAULT_DATASET = os.path.join(WS, "data/benchmark_dataset.jsonl")
+TEST_LEGACY = os.path.join(WS, "data/test.jsonl")
 
 DEFAULT_REPO = os.path.expanduser("~/Promotions")
 DEFAULT_N = 5
@@ -195,14 +196,30 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--n", type=int, default=DEFAULT_N)
     parser.add_argument("--repo", default=DEFAULT_REPO)
+    parser.add_argument("--dataset", default=None,
+                        help="Path to Q&A JSONL (default: benchmark_dataset.jsonl, "
+                             "fallback: test.jsonl)")
     parser.add_argument("--skip-agent", action="store_true", help="Skip slow Qwen agent")
     args = parser.parse_args()
 
     repo = os.path.expanduser(args.repo)
     if not os.path.exists(os.path.join(repo, ".repo-coach", "manifest.json")):
         raise SystemExit(f"No index at {repo}/.repo-coach/ — run: repo-coach build {repo}")
-    if not os.path.exists(TEST):
-        raise SystemExit(f"No test data at {TEST}")
+
+    # resolve dataset path
+    if args.dataset:
+        dataset_path = os.path.expanduser(args.dataset)
+    elif os.path.exists(DEFAULT_DATASET):
+        dataset_path = DEFAULT_DATASET
+    elif os.path.exists(TEST_LEGACY):
+        dataset_path = TEST_LEGACY
+        log(f"[warn] using legacy test.jsonl — run create_dataset.py for grounded data")
+    else:
+        raise SystemExit(
+            f"No dataset found. Run:\n"
+            f"  python3 scripts/create_dataset.py --repo {repo}"
+        )
+    log(f"Dataset: {dataset_path}")
 
     # Load graph once
     from core.navigator.graph_tools import GraphStore
@@ -220,7 +237,7 @@ def main():
             pass
     log(f"Ollama: {'UP' if ollama_ok else 'DOWN (agent skipped)'}")
 
-    items = [json.loads(l) for l in open(TEST) if l.strip()][:args.n]
+    items = [json.loads(l) for l in open(dataset_path) if l.strip()][:args.n]
     log(f"Benchmarking {len(items)} questions | repo={repo}")
     open(LOG, "a").write("=" * 70 + "\n")
 
@@ -241,7 +258,9 @@ def main():
     for i, it in enumerate(items, 1):
         q   = it["messages"][0]["content"]
         ref = it["messages"][1]["content"]
-        log(f"\nQ{i}/{len(items)}: {q[:80]}")
+        src = it.get("source_file", "")
+        src_tag = f" [{src}]" if src else ""
+        log(f"\nQ{i}/{len(items)}{src_tag}: {q[:80]}")
 
         # Extract graph evidence once per question
         log(f"  Q{i} → extracting graph evidence...")
