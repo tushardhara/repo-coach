@@ -12,6 +12,21 @@ _GO_STDLIB: Set[str] = {
     "fmt", "log", "os", "io", "strings", "strconv", "errors", "context",
     "sync", "time", "http", "json", "sort", "math", "bytes", "bufio",
     "filepath", "regexp", "reflect", "atomic",
+    # Standard library additions
+    "testing", "flag", "net", "url", "sql", "driver",
+    "utf8", "unicode", "binary", "encoding", "gzip", "tls",
+    "x509", "grpc", "proto", "signal", "exec", "template",
+    "scanner", "token", "parser", "printer", "heap", "ring",
+    "list", "tar", "zip", "rand", "sha256", "md5", "hmac",
+    "base64", "hex", "pem", "rsa", "ecdsa",
+    # Commonly used aliases in Go projects
+    "zerolog", "zap", "logrus", "viper", "cobra",
+}
+
+_GO_TEST_PKGS: set = {
+    "assert", "require", "mock", "suite", "testify",
+    "sqlmock", "pgxmock", "gomock", "httptest", "httpexpect",
+    "testcontainers", "dockertest",
 }
 
 _PYTHON_BUILTINS: Set[str] = {
@@ -27,7 +42,18 @@ _JS_GLOBALS: Set[str] = {
     "process",
 }
 
-_STDLIB_ALL: Set[str] = _GO_STDLIB | _PYTHON_BUILTINS | _JS_GLOBALS
+_STDLIB_ALL: Set[str] = _GO_STDLIB | _GO_TEST_PKGS | _PYTHON_BUILTINS | _JS_GLOBALS
+
+_GO_GENERIC_NAMES: frozenset = frozenset({
+    "error", "string", "close", "new", "init", "main",
+    "run", "start", "stop", "get", "set", "add", "remove",
+    "delete", "create", "update", "find", "load", "save",
+    "send", "receive", "handle", "process", "parse", "format",
+    "validate", "check", "encode", "decode", "write", "read",
+    "open", "connect", "disconnect", "register", "deregister",
+    "reset", "flush", "commit", "rollback", "lock", "unlock",
+    "wait", "signal", "done", "cancel",
+})
 
 
 def _is_stdlib(name: str, pkg: str) -> bool:
@@ -142,13 +168,18 @@ def resolve_calls(
 
         # ── Step 5: fuzzy (case-insensitive) ──────────────────────────────
         if not resolved:
-            fuzzy = idx.find_by_name_fuzzy(rc.callee_name)
-            if fuzzy:
-                n = len(fuzzy)
-                conf = max(0.30, 0.50 / n) if n > 1 else 0.50
-                emit(rc.caller_id, fuzzy[0].id, conf, rc.line,
-                     f"fuzzy:{rc.callee_name}")
-                resolved = True
+            # Skip fuzzy for names too generic to match reliably
+            if rc.callee_name.lower() in _GO_GENERIC_NAMES:
+                pass  # fall through to unresolved
+            else:
+                fuzzy = idx.find_by_name_fuzzy(rc.callee_name)
+                if fuzzy:
+                    n = len(fuzzy)
+                    if n <= 8:  # hard cap: > 8 candidates means too ambiguous
+                        conf = max(0.30, 0.50 / n) if n > 1 else 0.50
+                        emit(rc.caller_id, fuzzy[0].id, conf, rc.line,
+                             f"fuzzy:{rc.callee_name}" + (f" (1-of-{n})" if n > 1 else ""))
+                        resolved = True
 
         # ── Unresolved ────────────────────────────────────────────────────
         if not resolved:

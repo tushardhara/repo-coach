@@ -25,6 +25,26 @@ _GO_KEYWORDS_BUILTINS = frozenset({
     "new", "panic", "recover", "print", "println",
     "range", "break", "continue", "goto", "fallthrough",
     "var", "type", "const", "map", "chan", "func",
+    # Type conversions that look like calls
+    "byte", "rune", "int8", "int16", "int32", "int64",
+    "uint8", "uint16", "uint32", "uint64", "float32", "float64",
+    "complex64", "complex128", "uintptr", "string", "bool",
+    "int", "uint", "error",
+})
+
+_GO_COMMON_VARS: frozenset = frozenset({
+    # testing: *testing.T, *testing.B, *testing.M, *testing.F
+    "t", "b", "m", "f",
+    # common receiver/context names in web frameworks
+    "c", "ctx", "r", "w", "req", "resp",
+    # common local variable names that are never import aliases
+    "err", "e", "v", "k", "n", "i", "s",
+    # db/tx handles
+    "db", "tx", "rows", "row", "stmt",
+    # sync/concurrent
+    "wg", "mu", "g", "ch",
+    # misc
+    "done", "x", "y", "z", "h", "p", "q",
 })
 
 # ── Patterns ──────────────────────────────────────────────────────────────────
@@ -77,7 +97,7 @@ class GoParser(BaseParser):
         result.imports = self._extract_imports(content, rel_path)
         symbols = self._extract_symbols(lines, rel_path, pkg)
         result.symbols = symbols
-        result.calls = self._extract_calls(lines, symbols, rel_path)
+        result.calls = self._extract_calls(lines, symbols, rel_path, result.imports)
         return result
 
     # ── package ───────────────────────────────────────────────────────────────
@@ -275,9 +295,20 @@ class GoParser(BaseParser):
     # ── calls ─────────────────────────────────────────────────────────────────
 
     def _extract_calls(
-        self, lines: List[str], symbols: List[Symbol], rel_path: str
+        self, lines: List[str], symbols: List[Symbol], rel_path: str,
+        imports=None
     ) -> List[RawCall]:
         """Scan body of each function/method symbol for call expressions."""
+        # Build external and all-aliases sets from this file's imports
+        external_aliases: set = set()
+        all_import_aliases: set = set()
+        for imp in (imports or []):
+            all_import_aliases.add(imp.alias)
+            # External: import path first segment contains '.' (e.g. github.com/...)
+            first_seg = imp.imported_path.split("/")[0]
+            if "." in first_seg:
+                external_aliases.add(imp.alias)
+
         calls: List[RawCall] = []
         func_syms = [s for s in symbols if s.kind in ("function", "method")]
 
@@ -290,13 +321,17 @@ class GoParser(BaseParser):
                     continue
                 line = lines[idx]
                 calls.extend(
-                    self._extract_calls_from_line(line, line_no, sym.id, rel_path)
+                    self._extract_calls_from_line(
+                        line, line_no, sym.id, rel_path,
+                        external_aliases, all_import_aliases
+                    )
                 )
 
         return calls
 
     def _extract_calls_from_line(
-        self, line: str, line_no: int, caller_id: str, rel_path: str
+        self, line: str, line_no: int, caller_id: str, rel_path: str,
+        external_aliases=None, all_import_aliases=None
     ) -> List[RawCall]:
         calls: List[RawCall] = []
         seen_positions: set = set()
@@ -306,6 +341,12 @@ class GoParser(BaseParser):
             pkg_name = m.group(1)
             func_name = m.group(2)
             if func_name in _GO_KEYWORDS_BUILTINS or pkg_name in _GO_KEYWORDS_BUILTINS:
+                continue
+            if pkg_name in (external_aliases or set()):
+                continue  # external package, resolver can never find it
+            # Skip if pkg_name looks like a variable (not an import alias)
+            if (pkg_name not in (all_import_aliases or set())
+                    and pkg_name in _GO_COMMON_VARS):
                 continue
             pos = m.start()
             seen_positions.add(m.start(2))  # track the function-name position
