@@ -22,6 +22,7 @@ import subprocess
 import sys
 import urllib.request
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Make repo_coach importable
 REPO_COACH_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -144,8 +145,9 @@ _ANSWER_INSTRUCTION = (
 
 def build_prompt_with_graph(question: str, evidence: str) -> str:
     return (
-        f"Codebase Q&A. Use ONLY the evidence. {_ANSWER_INSTRUCTION}\n\n"
-        f"EVIDENCE:\n{evidence}\n\n"
+        f"Codebase Q&A. {_ANSWER_INSTRUCTION}\n"
+        f"Graph evidence below — prefer it when specific, supplement with your knowledge when sparse.\n\n"
+        f"GRAPH EVIDENCE:\n{evidence}\n\n"
         f"QUESTION: {question}"
     )
 
@@ -326,6 +328,14 @@ def main():
 
     scores = {k: [] for k, _ in configs}
 
+    # workers: 6 model calls + 6 judge calls per question run in parallel
+    N_WORKERS = 8
+
+    def _answer_and_judge(key: str, model_id: str, prompt: str, q: str, ref: str):
+        a = claude_answer(model_id, prompt)
+        s = judge(q, ref, a)
+        return key, s
+
     for i, it in enumerate(items, 1):
         q   = it["messages"][0]["content"]
         ref = it["messages"][1]["content"]
@@ -334,37 +344,42 @@ def main():
         tag = f" [{cat}|{src}]" if src else (f" [{cat}]" if cat else "")
         log(f"\nQ{i}/{len(items)}{tag}: {q[:80]}")
 
-        # Extract graph evidence once per question
-        log(f"  Q{i} → extracting graph evidence...")
+        # Extract graph evidence once per question (fast, local)
         evidence = extract_graph_evidence(graph, q)
-        log(f"  Q{i} → evidence: {len(evidence)} chars | strategy hint in first 60: {evidence[:60]!r}")
+        log(f"  Q{i} → evidence: {len(evidence)} chars")
 
         prompt_raw   = build_prompt_raw(q)
         prompt_graph = build_prompt_with_graph(q, evidence)
 
+        # Fan out all model calls in parallel
+        tasks = []
         for model_key, model_id in CLAUDE_MODELS.items():
-            # raw
-            key_raw = f"{model_key}_raw"
-            log(f"  Q{i} → {key_raw}...")
-            a = claude_answer(model_id, prompt_raw)
-            s = judge(q, ref, a)
-            scores[key_raw].append(s)
-            log(f"  Q{i} → {key_raw}: {s}")
-
-            # with graph
-            key_graph = f"{model_key}_graph"
-            log(f"  Q{i} → {key_graph}...")
-            a = claude_answer(model_id, prompt_graph)
-            s = judge(q, ref, a)
-            scores[key_graph].append(s)
-            log(f"  Q{i} → {key_graph}: {s}")
-
+            tasks.append((f"{model_key}_raw",   model_id, prompt_raw))
+            tasks.append((f"{model_key}_graph",  model_id, prompt_graph))
         if ollama_ok:
-            log(f"  Q{i} → agent...")
-            a = agent_answer(q, repo)
-            s = judge(q, ref, a)
-            scores["agent"].append(s)
-            log(f"  Q{i} → agent: {s}")
+            tasks.append(("agent", None, None))  # handled separately below
+
+        q_scores = {}
+        with ThreadPoolExecutor(max_workers=N_WORKERS) as pool:
+            futures = {}
+            for key, model_id, prompt in tasks:
+                if key == "agent":
+                    fut = pool.submit(lambda: ("agent", judge(q, ref, agent_answer(q, repo))))
+                else:
+                    fut = pool.submit(_answer_and_judge, key, model_id, prompt, q, ref)
+                futures[fut] = key
+
+            for fut in as_completed(futures):
+                try:
+                    k, s = fut.result()
+                    q_scores[k] = s
+                    log(f"  Q{i} → {k}: {s}")
+                except Exception as e:
+                    log(f"  Q{i} → {futures[fut]}: error ({e})")
+                    q_scores[futures[fut]] = 0
+
+        for key, _ in configs:
+            scores[key].append(q_scores.get(key, 0))
 
     # ── Results table ─────────────────────────────────────────────────────────
     log("\n" + "=" * 70)
