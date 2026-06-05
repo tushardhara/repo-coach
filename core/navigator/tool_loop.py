@@ -16,6 +16,29 @@ from core.llm.prompts import SYSTEM_PROMPT, MAX_TOOL_CALLS, format_tool_result, 
 from core.navigator.answer_contract import parse_response, ToolCall, FinalAnswer, is_valid_tool_call
 from core.navigator.graph_tools import GraphStore, VALID_TOOLS
 from core.navigator.planner import classify_question, suggest_first_tool
+from core.navigator.evidence_packer import (
+    pack_flow_evidence, pack_impact_evidence,
+    pack_table_evidence, pack_symbol_evidence,
+)
+
+
+def _pack_result(tool_name: str, args: dict, result_json: str, question: str) -> str:
+    """Use evidence_packer for high-signal tools; fall back to format_tool_result."""
+    try:
+        data = json.loads(result_json)
+    except Exception:
+        return format_tool_result(tool_name, args, result_json)
+
+    try:
+        if tool_name == "build_flow":
+            return pack_flow_evidence(question, data, {}, {})
+        elif tool_name == "build_impact":
+            return pack_impact_evidence(question, data)
+        elif tool_name == "search_table":
+            return pack_table_evidence(question, data)
+    except Exception:
+        pass
+    return format_tool_result(tool_name, args, result_json)
 
 
 class AgentLoop:
@@ -38,6 +61,7 @@ class AgentLoop:
         tool_call_count = 0
         retry_count = 0
         MAX_RETRIES = 2
+        invalid_tool_count = 0
 
         # Seed the first tool call from the planner so Qwen uses correct arg names
         strategy = classify_question(question)
@@ -54,7 +78,7 @@ class AgentLoop:
         messages.append({"role": "assistant", "content": first_call_json})
         messages.append({
             "role": "user",
-            "content": format_tool_result(first_tool, first_args, first_result),
+            "content": _pack_result(first_tool, first_args, first_result, question),
         })
 
         # For impact/flow strategies, seed a second tool call automatically
@@ -79,7 +103,7 @@ class AgentLoop:
                 messages.append({"role": "assistant", "content": second_call_json})
                 messages.append({
                     "role": "user",
-                    "content": format_tool_result(second_tool, second_args, second_result),
+                    "content": _pack_result(second_tool, second_args, second_result, question),
                 })
 
         elif strategy == "flow" and tool_call_count < MAX_TOOL_CALLS:
@@ -109,7 +133,7 @@ class AgentLoop:
                 messages.append({"role": "assistant", "content": second_call_json})
                 messages.append({
                     "role": "user",
-                    "content": format_tool_result(second_tool, second_args, second_result),
+                    "content": _pack_result(second_tool, second_args, second_result, question),
                 })
 
         while tool_call_count < MAX_TOOL_CALLS:
@@ -147,6 +171,12 @@ class AgentLoop:
             tc = parsed
             valid, err = is_valid_tool_call(tc, VALID_TOOLS)
             if not valid:
+                invalid_tool_count += 1
+                if invalid_tool_count >= 3:
+                    return (
+                        f"Model called invalid tools {invalid_tool_count} times. Aborting. Last error: {err}",
+                        tool_log,
+                    )
                 messages.append({"role": "assistant", "content": response_text})
                 messages.append({"role": "user", "content": f"Tool error: {err}. Try again."})
                 continue
@@ -157,6 +187,7 @@ class AgentLoop:
             except Exception as e:
                 result_json = json.dumps({"error": str(e)})
 
+            invalid_tool_count = 0  # reset on successful valid tool call
             tool_call_count += 1
             result_summary = result_json[:200]
             tool_log.append({"tool": tc.tool, "args": tc.args, "result_summary": result_summary})
@@ -168,7 +199,7 @@ class AgentLoop:
             messages.append({"role": "assistant", "content": response_text})
             messages.append({
                 "role": "user",
-                "content": format_tool_result(tc.tool, tc.args, result_json),
+                "content": _pack_result(tc.tool, tc.args, result_json, question),
             })
 
         # Hit max tool calls — ask for best answer with what we have

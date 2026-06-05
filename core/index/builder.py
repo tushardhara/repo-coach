@@ -61,10 +61,20 @@ def build(repo_root: str, verbose: bool = True) -> dict:
     n_files = write_file_index(_out(repo_root, "file_index.jsonl"), files)
     log(f"      {n_files} source files indexed")
 
+    # Read all file contents once; both parser and detectors reuse this dict
+    file_contents: dict = {}
+    for fr in files:
+        abs_p = os.path.join(repo_root, fr.path)
+        try:
+            with open(abs_p, encoding="utf-8", errors="replace") as fh:
+                file_contents[fr.path] = fh.read()
+        except OSError:
+            file_contents[fr.path] = ""
+
     # ── Phase 2: Parse symbols ─────────────────────────────────────────────
     log("[2/5] Parsing symbols...")
     from core.parsers.registry import parse_all
-    symbols, raw_calls, raw_imports = parse_all(repo_root, files, verbose=verbose)
+    symbols, raw_calls, raw_imports = parse_all(repo_root, files, verbose=verbose, contents=file_contents)
     n_sym = write_symbol_index(_out(repo_root, "symbols.jsonl"), symbols)
     log(f"      {n_sym} symbols extracted")
 
@@ -85,7 +95,7 @@ def build(repo_root: str, verbose: bool = True) -> dict:
     # ── Phase 4: Detect facts ──────────────────────────────────────────────
     log("[4/5] Detecting side effects...")
     from core.detectors.runner import detect_all
-    facts, extra_relations = detect_all(repo_root, files, symbols)
+    facts, extra_relations = detect_all(repo_root, files, symbols, contents=file_contents)
     relations += extra_relations
 
     # Materialise route symbols from EXPOSES_ROUTE relations so they appear in symbols.jsonl
@@ -123,6 +133,22 @@ def build(repo_root: str, verbose: bool = True) -> dict:
 
     elapsed = round(time.time() - t0, 1)
 
+    # ── Quality metrics ────────────────────────────────────────────────────
+    calls_rels = [r for r in relations if r.type == "CALLS"]
+    n_calls = len(calls_rels)
+
+    resolution_rate = round(n_calls / max(1, n_calls + n_unr), 3)
+
+    mean_confidence = round(
+        sum(r.confidence for r in calls_rels) / max(1, n_calls), 3
+    )
+
+    ambiguous_edges = sum(1 for r in calls_rels if r.confidence < 0.80)
+    ambiguity_pct = round(100.0 * ambiguous_edges / max(1, n_calls), 1)
+
+    n_routes = sum(1 for r in relations if r.type == "EXPOSES_ROUTE")
+    flow_coverage = round(n_flow / max(1, n_routes), 2) if n_routes else 0.0
+
     # ── Manifest ───────────────────────────────────────────────────────────
     stats = {
         "repo": repo_root,
@@ -135,8 +161,14 @@ def build(repo_root: str, verbose: bool = True) -> dict:
         "elapsed_s": elapsed,
         "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    stats["resolution_rate"] = resolution_rate
+    stats["mean_confidence"] = mean_confidence
+    stats["ambiguity_pct"] = ambiguity_pct
+    stats["flow_coverage"] = flow_coverage
+    stats["ambiguous_edges"] = ambiguous_edges
     with open(_out(repo_root, "manifest.json"), "w") as f:
         json.dump(stats, f, indent=2)
 
+    log(f"[build] quality: resolution={resolution_rate:.1%}  mean_conf={mean_confidence:.2f}  ambiguity={ambiguity_pct:.1f}%  flow_cov={flow_coverage:.2f}")
     log(f"[build] done in {elapsed}s")
     return stats

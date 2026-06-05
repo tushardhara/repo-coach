@@ -26,6 +26,7 @@ def detect_all(
     repo_root: str,
     files: List[FileRecord],
     symbols: List[Symbol],
+    contents: dict = None,
 ) -> Tuple[List[Fact], List[Relation]]:
     """
     Run all detectors over every file.
@@ -46,12 +47,15 @@ def detect_all(
         rel_path = file_record.path
         file_symbols = file_symbol_map.get(rel_path, [])
 
-        try:
-            with open(abs_path, "r", encoding="utf-8", errors="replace") as fh:
-                content = fh.read()
-        except OSError as exc:
-            print(f"[detectors] warning: cannot read {abs_path}: {exc}")
-            continue
+        if contents is not None and rel_path in contents:
+            content = contents[rel_path]
+        else:
+            try:
+                with open(abs_path, "r", encoding="utf-8", errors="replace") as fh:
+                    content = fh.read()
+            except OSError as exc:
+                print(f"[detectors] warning: cannot read {abs_path}: {exc}")
+                continue
 
         for detector in DETECTORS:
             try:

@@ -5,6 +5,7 @@ from collections import deque
 from typing import Dict, List, Optional, Tuple
 
 from core.graph.schema import Symbol, Relation, Fact, Flow, FileRecord
+from core.navigator.locator import locate
 from core.index.file_index import load_file_index
 from core.index.symbol_index import load_symbol_index
 from core.index.relation_index import load_relation_index
@@ -14,6 +15,7 @@ from core.index.flow_index import load_flow_index
 OUTPUT_DIR = ".repo-coach"
 
 VALID_TOOLS = {
+    "find_files",
     "find_symbols",
     "find_routes",
     "get_symbol",
@@ -44,6 +46,7 @@ class GraphStore:
         self.caller_map: Dict[str, List[Relation]] = {}   # to_id → incoming CALLS
         self.facts: Dict[str, List[Fact]] = {}            # owner → facts
         self.flows: Dict[str, Flow] = {}
+        self.unresolved: List[dict] = []
         # route symbol id → handler symbol id
         self._route_to_handler: Dict[str, str] = {}
         # handler symbol id → route symbol id
@@ -70,6 +73,13 @@ class GraphStore:
 
         for flow in load_flow_index(self._out("flows.jsonl")):
             self.flows[flow.id] = flow
+
+        try:
+            from core.graph.schema import read_jsonl
+            for rec in read_jsonl(self._out("unresolved.jsonl")):
+                self.unresolved.append(rec)
+        except Exception:
+            pass
 
     def is_ready(self) -> bool:
         return bool(self.symbols)
@@ -111,6 +121,9 @@ class GraphStore:
 
         results = exact + starts + contains
         return results[:limit]
+
+    def find_files(self, query: str, top: int = 5) -> list:
+        return locate(self, query, top=top)
 
     def find_routes(self, query: str, limit: int = 10) -> List[dict]:
         """Search route symbols by name/id. Also find handlers via EXPOSES_ROUTE."""
@@ -182,7 +195,7 @@ class GraphStore:
         end = min(len(all_lines), sym.end_line)
         snippet = all_lines[start:end]
 
-        MAX_LINES = 80
+        MAX_LINES = 200
         if len(snippet) > MAX_LINES:
             snippet = snippet[:MAX_LINES]
             snippet.append(f"// ... truncated (showing {MAX_LINES} of {end - start} lines)\n")
@@ -259,11 +272,14 @@ class GraphStore:
         all_facts = list(self.facts.get(symbol_id, []))
         for rel in self.callee_map.get(symbol_id, []):
             all_facts.extend(self.facts.get(rel.to_id, []))
-        return [
-            {"owner": f.owner, "type": f.type, "target": f.target,
-             "evidence": f.evidence, "line": f.line}
-            for f in all_facts
-        ]
+        seen, out = set(), []
+        for f in all_facts:
+            key = (f.owner, f.type, f.target)
+            if key not in seen:
+                seen.add(key)
+                out.append({"owner": f.owner, "type": f.type, "target": f.target,
+                            "evidence": f.evidence, "line": f.line})
+        return out
 
     def search_table(self, table_name: str) -> dict:
         """Find facts referencing table_name. Group into readers/writers."""
@@ -414,7 +430,9 @@ class GraphStore:
             return json.dumps({"error": f"unknown tool {tool_name!r}. Valid: {sorted(VALID_TOOLS)}"})
 
         try:
-            if tool_name == "find_symbols":
+            if tool_name == "find_files":
+                result = self.find_files(args.get("query", ""), args.get("top", 5))
+            elif tool_name == "find_symbols":
                 result = self.find_symbols(args.get("query", ""), args.get("limit", 10))
             elif tool_name == "find_routes":
                 result = self.find_routes(args.get("query", ""), args.get("limit", 10))
@@ -434,8 +452,6 @@ class GraphStore:
                 result = self.build_flow(args.get("entrypoint_id", ""))
             elif tool_name == "build_impact":
                 result = self.build_impact(args.get("symbol_id", ""))
-            else:
-                result = {"error": "unreachable"}
         except Exception as exc:
             result = {"error": str(exc)}
 

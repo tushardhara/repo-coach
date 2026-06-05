@@ -13,6 +13,7 @@ Rules:
 - If information is missing after tool lookup, say "Not found in Code Knowledge Graph."
 
 Available tools (use EXACT arg names shown):
+- find_files          args: {"query": "<natural language question>", "top": 5}
 - find_symbols        args: {"query": "<name>", "limit": 10}
 - find_routes         args: {"query": "<path or method>", "limit": 10}
 - get_symbol          args: {"symbol_id": "<id>"}

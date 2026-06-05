@@ -20,6 +20,9 @@ _TABLE_WORDS     = ["table", "tables", "database", "sql"]
 # "db" matched as word only — avoid false hits in identifiers
 _TABLE_WORDS_WB  = ["db"]
 
+_REDIS_WORDS     = ["redis", "queue", "kafka", "rabbitmq", "pubsub", "celery", "worker", "broker"]
+_QUEUE_PHRASES   = ["reads from redis", "writes to redis", "publishes to", "consumes from"]
+
 _SYMBOL_PHRASES  = ["what does", "what is"]
 _SYMBOL_WORDS    = ["function", "method", "class", "explain"]
 
@@ -53,6 +56,12 @@ def classify_question(question: str) -> str:
                       table-word > impact-word > symbol-word > flow > general.
     """
     q = question.lower()
+
+    # Redis/queue detection before table check — prevents misroute to search_table
+    if _has_phrase(q, _QUEUE_PHRASES):
+        return "general"
+    if _has_word(q, _REDIS_WORDS):
+        return "general"
 
     # Phrase-level checks first (more specific)
     if _has_phrase(q, _TABLE_PHRASES):
@@ -159,12 +168,7 @@ def suggest_first_tool(question: str, strategy: str) -> Tuple[str, dict]:
                     "put", "patch", "delete", "/"}
 
     if strategy == "flow":
-        # Always try routes first — routes are the natural entry point for flows.
-        # Use stemmed keyword for better matching.
-        keyword = _extract_keywords(question)
-        if any(w in q for w in _ROUTE_WORDS):
-            return "find_routes", {"query": keyword}
-        return "find_routes", {"query": keyword}
+        return "find_files", {"query": question, "top": 5}
 
     elif strategy == "impact":
         return "find_symbols", {"query": _extract_identifier(question)}
@@ -173,7 +177,7 @@ def suggest_first_tool(question: str, strategy: str) -> Tuple[str, dict]:
         return "search_table", {"table_name": _extract_table_name(question)}
 
     elif strategy == "symbol":
-        return "find_symbols", {"query": _extract_identifier(question)}
+        return "find_files", {"query": question, "top": 5}
 
     else:  # general
-        return "find_symbols", {"query": _extract_identifier(question)}
+        return "find_files", {"query": question, "top": 5}

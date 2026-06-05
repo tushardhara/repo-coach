@@ -104,16 +104,24 @@ def resolve_calls(
         if not resolved and caller_pkg:
             pkg_matches = idx.find_in_package(caller_pkg, rc.callee_name)
             if pkg_matches:
-                emit(rc.caller_id, pkg_matches[0].id, 0.85, rc.line,
-                     f"same-pkg:{caller_pkg}.{rc.callee_name}")
+                n = len(pkg_matches)
+                conf = max(0.50, 0.85 / n) if n > 1 else 0.85
+                evidence = f"same-pkg:{caller_pkg}.{rc.callee_name}"
+                if n > 1:
+                    evidence += f" (1-of-{n})"
+                emit(rc.caller_id, pkg_matches[0].id, conf, rc.line, evidence)
                 resolved = True
 
         # ── Step 3: import-qualified (callee_pkg is a package qualifier) ────
         if not resolved and rc.callee_pkg:
             pkg_matches = idx.find_in_package(rc.callee_pkg, rc.callee_name)
             if pkg_matches:
-                emit(rc.caller_id, pkg_matches[0].id, 0.80, rc.line,
-                     f"pkg-qual:{rc.callee_pkg}.{rc.callee_name}")
+                n = len(pkg_matches)
+                conf = max(0.50, 0.80 / n) if n > 1 else 0.80
+                evidence = f"pkg-qual:{rc.callee_pkg}.{rc.callee_name}"
+                if n > 1:
+                    evidence += f" (1-of-{n})"
+                emit(rc.caller_id, pkg_matches[0].id, conf, rc.line, evidence)
                 resolved = True
 
         # ── Step 4: receiver / method ──────────────────────────────────────
@@ -124,15 +132,21 @@ def resolve_calls(
                 if s.receiver and s.receiver.lower() == rc.callee_pkg.lower()
             ]
             if candidates:
-                emit(rc.caller_id, candidates[0].id, 0.75, rc.line,
-                     f"receiver:{rc.callee_pkg}.{rc.callee_name}")
+                n = len(candidates)
+                conf = max(0.40, 0.75 / n) if n > 1 else 0.75
+                evidence = f"receiver:{rc.callee_pkg}.{rc.callee_name}"
+                if n > 1:
+                    evidence += f" (1-of-{n})"
+                emit(rc.caller_id, candidates[0].id, conf, rc.line, evidence)
                 resolved = True
 
         # ── Step 5: fuzzy (case-insensitive) ──────────────────────────────
         if not resolved:
             fuzzy = idx.find_by_name_fuzzy(rc.callee_name)
             if fuzzy:
-                emit(rc.caller_id, fuzzy[0].id, 0.50, rc.line,
+                n = len(fuzzy)
+                conf = max(0.30, 0.50 / n) if n > 1 else 0.50
+                emit(rc.caller_id, fuzzy[0].id, conf, rc.line,
                      f"fuzzy:{rc.callee_name}")
                 resolved = True
 

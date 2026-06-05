@@ -18,6 +18,7 @@ def parse_all(
     repo_root: str,
     files: List[FileRecord],
     verbose: bool = False,
+    contents: dict = None,
 ) -> Tuple[List[Symbol], List[RawCall], List[RawImport]]:
     """Parse every file in *files* using the registered parser for its language.
 
@@ -42,12 +43,15 @@ def parse_all(
             abs_path = os.path.join(repo_root, file_record.path)
             rel_path = file_record.path
 
-        try:
-            with open(abs_path, errors="ignore") as fh:
-                content = fh.read()
-        except OSError as exc:
-            warnings.warn(f"Cannot read {abs_path}: {exc}")
-            continue
+        if contents is not None and rel_path in contents:
+            content = contents[rel_path]
+        else:
+            try:
+                with open(abs_path, errors="ignore") as fh:
+                    content = fh.read()
+            except OSError as exc:
+                warnings.warn(f"Cannot read {abs_path}: {exc}")
+                continue
 
         try:
             result = parser.parse_file(abs_path, rel_path, content)

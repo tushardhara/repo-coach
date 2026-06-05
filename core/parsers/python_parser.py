@@ -9,9 +9,20 @@ from core.parsers.base import BaseParser, ParseResult, RawCall, RawImport
 
 
 def _pkg_from_path(rel_path: str) -> str:
-    """Return top-level package name from relative file path."""
+    """Return dotted module path from relative file path."""
     parts = rel_path.replace("\\", "/").split("/")
-    return parts[0] if len(parts) > 1 else ""
+    if len(parts) == 1:
+        return ""  # root-level file, no package
+    # Strip .py extension from filename part
+    filename = parts[-1]
+    if filename.endswith(".py"):
+        filename = filename[:-3]
+    # __init__ represents the package itself, not a sub-module
+    if filename == "__init__":
+        dotted = ".".join(parts[:-1])
+    else:
+        dotted = ".".join(parts[:-1] + [filename])
+    return dotted
 
 
 def _args_signature(args: ast.arguments) -> str:
