@@ -10,14 +10,15 @@ RepoCoach builds a structured Code Knowledge Graph of any repo and lets you quer
 
 ## What it does
 
-Ask a question → the agent picks the right navigation tool → traverses the Knowledge Graph → answers only from retrieved evidence.
+Ask a question → the agent locates the right files → traverses the Knowledge Graph → answers only from retrieved evidence.
 
 ```
 $ repo-coach ask "How does voucher assignment flow?" --repo ~/my-repo
 
-Tools used: 2
-  find_routes({'query': 'assign'}) -> [{"handler_id": "go:function:routes/assign.go:AssignVoucher"...
+Tools used: 3
+  find_files({'query': 'voucher assignment flow'}) -> [{"file": "routes/assign.go", "score": 8.4...
   build_flow({'entrypoint_id': 'go:function:routes/assign.go:AssignVoucher'}) -> {"chain": [...
+  get_facts({'symbol_id': '...'}) -> [{"type": "WRITES_TABLE", "target": "external_voucher_codes"...
 
 Answer: AssignVoucher validates the coupon via CheckUniqueVoucherReaderDB,
 writes to external_voucher_codes, then publishes to the assignment queue.
@@ -67,22 +68,24 @@ Your repo
             ├── relations.jsonl     — CALLS, IMPORTS, EXPOSES_ROUTE, ...
             ├── facts.jsonl         — DB reads/writes, Redis, queues, HTTP calls
             ├── flows.jsonl         — pre-built call chains per route
-            └── manifest.json       — build stats
+            ├── unresolved.jsonl    — call references that couldn't be resolved
+            └── manifest.json       — build stats + quality metrics
                      │
                      ▼
             repo-coach ask  →  Ollama Qwen (tool-calling agent loop)
                                     │
                      ┌──────────────┴──────────────┐
-                     │  Navigation tools (10 total) │
-                     │  find_symbols  find_routes   │
-                     │  build_flow    build_impact  │
-                     │  search_table  get_callees   │
-                     │  get_callers   get_facts      │
-                     │  get_symbol    get_code       │
-                     └─────────────────────────────-┘
+                     │  Navigation tools (11 total) │
+                     │  find_files    find_symbols  │
+                     │  find_routes   build_flow    │
+                     │  build_impact  search_table  │
+                     │  get_callees   get_callers   │
+                     │  get_facts     get_symbol    │
+                     │  get_code                    │
+                     └──────────────────────────────┘
 ```
 
-The agent calls tools in a JSON protocol loop (max 8 calls), accumulates evidence, then writes a grounded answer.
+The agent starts by locating the most relevant files (`find_files`), calls tools in a JSON protocol loop (max 8 calls), accumulates structured evidence via the evidence packer, then writes a grounded answer.
 
 ---
 
@@ -126,6 +129,29 @@ The graph is built from static analysis — no LLM needed for indexing.
 
 **Supported languages:** Python (AST), Go (regex), JavaScript/TypeScript (regex).
 
+### Build quality metrics
+
+`manifest.json` includes quality signals after every build:
+
+| Metric | Description |
+|---|---|
+| `resolution_rate` | Fraction of internal calls successfully resolved to a symbol |
+| `mean_confidence` | Average edge confidence (same-file=0.95, fuzzy=0.50) |
+| `ambiguity_pct` | % of CALLS edges that picked one candidate from multiple matches |
+| `flow_coverage` | Fraction of routes that have a pre-built flow |
+
+---
+
+## File locator
+
+The `find_files` tool ranks files for a natural-language question using three signals:
+
+- **Lexical** — keyword hits in the file path and symbol names
+- **Centrality** — in/out call degree (hub files score higher)
+- **Role** — route-exposing files and files with DB/Redis/queue facts score higher
+
+This replaces the old single-keyword extraction that frequently returned the wrong file as a starting point.
+
 ---
 
 ## Benchmark
@@ -165,7 +191,7 @@ repo-coach/
 │   ├── parsers/              # Python (AST), Go, JS/TS (regex)
 │   ├── resolver/             # CALLS + IMPORTS resolution
 │   ├── detectors/            # Routes, SQL, Redis, queues, HTTP, events
-│   ├── navigator/            # Graph tools, agent loop, evidence packer
+│   ├── navigator/            # Graph tools, agent loop, evidence packer, locator
 │   └── llm/                  # Ollama client + prompts
 ├── scripts/
 │   ├── benchmark_agent.py    # repo-coach ask vs Haiku (5 questions)
@@ -183,18 +209,20 @@ repo-coach/
 export REPO_COACH_MODEL=qwen2.5-coder:7b
 repo-coach ask "..." --repo ~/your-repo
 
-# Build is verbose by default; suppress with --no-verbose if needed
-repo-coach build ~/your-repo
+# Point at a different Ollama host
+export OLLAMA_HOST=http://192.168.1.100:11434
+repo-coach ask "..." --repo ~/your-repo
 ```
 
 ---
 
 ## Honest limitations
 
-- **"Why" questions score low** — the graph answers *structure* (how, what, who calls what). Questions about intent and history require reading commit messages or comments, not graph traversal.
-- **Go route aliases** — `Handler = pkg.Func` alias patterns can't be resolved without tree-sitter. The agent falls back to compound keyword search.
+- **"Why" questions score low** — the graph answers *structure* (how, what, who calls what). Questions about intent require reading commit messages or comments, not graph traversal.
+- **Go route aliases** — `Handler = pkg.Func` alias patterns can't be resolved without tree-sitter. The agent falls back to file-level search.
 - **Qwen 1.5B tool-calling** — small model sometimes fails to follow the JSON tool-call protocol. Sonnet + graph context (direct, no agent loop) outperforms the agent on hard questions.
 - **Regex parsers** — Go and JS/TS use regex (tree-sitter not installed by default). Accuracy is ~0.7 vs AST's 1.0.
+- **External packages** — calls to 3rd-party libraries (testify, pgxmock, etc.) are filtered at parse time and do not appear in the call graph.
 
 ---
 
