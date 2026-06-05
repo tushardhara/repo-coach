@@ -34,3 +34,5 @@ fingerprints.json
 meta.json
 config.json
 graph.json
+
+repo_coach.egg-info/
