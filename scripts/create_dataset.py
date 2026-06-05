@@ -16,9 +16,14 @@ import os
 import random
 import subprocess
 import sys
+import urllib.request
+import urllib.error
 
 REPO_COACH_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_COACH_ROOT)
+
+_ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+_ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 DEFAULT_REPO  = os.path.expanduser("~/Promotions")
 DEFAULT_OUT   = os.path.expanduser("~/finetune-workspace/data/benchmark_dataset.jsonl")
@@ -80,21 +85,57 @@ def read_file_code(repo_root: str, rel_path: str) -> str:
 # ── Opus Q&A generation ───────────────────────────────────────────────────────
 
 SYSTEM = """\
-You analyze source code and create benchmark evaluation questions.
-Your job: generate specific, factual questions whose answers are clearly visible in the code provided.
+You analyze source code and create benchmark evaluation questions for a Code Knowledge Graph.
+The graph captures: function/method call edges, DB/Redis/queue facts, exposed HTTP routes, and
+caller/callee relationships. It does NOT capture: variable values, return types, constant
+definitions, test helper internals, or logging field details.
 Always reply with a valid JSON array only — no prose, no markdown fences.\
+"""
+
+# Question categories aligned to graph tools
+_CATEGORY_GUIDE = """\
+ALLOWED question categories (graph can answer these):
+  CALLERS  — "Which functions call X?" / "What calls into X?"
+  CALLEES  — "What does function X call?" / "Which functions does X invoke?"
+  DB_ACCESS — "What DB tables / Redis keys / queues does X read or write?"
+  ROUTES   — "What HTTP routes does this file expose?"
+  FLOW     — "What is the call chain starting from route/handler X?"
+
+BANNED question types (graph cannot answer these — do not generate):
+  - What does function X return? (return types not in graph)
+  - What are the constants / sentinel errors defined? (graph has no constant nodes)
+  - What does a test helper/fake/mock return or contain? (test internals not indexed)
+  - What fields does a logger / struct attach? (field-level info not in graph)
+  - Why does X do Y? (intent questions)
+  - Any question whose answer requires reading variable assignments or literals
 """
 
 def make_prompt(filepath: str, code: str, n: int, symbols: list, facts: list) -> str:
     sym_ctx = ""
     if symbols:
-        sym_ctx = "\n\nKnown symbols in this file:\n" + \
-                  "\n".join(f"  - {s.kind}: {s.name}" for s in symbols[:20])
+        # only show non-test, non-init symbols to bias toward graph-visible ones
+        visible = [s for s in symbols if s.kind in ("function", "method", "route")][:20]
+        if visible:
+            sym_ctx = "\n\nIndexed symbols (functions/methods/routes):\n" + \
+                      "\n".join(f"  - {s.kind}: {s.name}" for s in visible)
 
     fact_ctx = ""
     if facts:
-        fact_ctx = "\n\nKnown facts (DB/Redis/queue access):\n" + \
-                   "\n".join(f"  - {f.type}: {f.target}" for f in facts[:10])
+        fact_ctx = "\n\nIndexed facts (DB/Redis/queue access detected by static analysis):\n" + \
+                   "\n".join(f"  - {f.type}: {f.target}" for f in facts[:15])
+
+    has_routes = any(s.kind == "route" for s in symbols)
+    has_facts  = bool(facts)
+    has_callees = bool(symbols)
+
+    category_hint = []
+    if has_routes:
+        category_hint.append("ROUTES or FLOW")
+    if has_facts:
+        category_hint.append("DB_ACCESS")
+    if has_callees:
+        category_hint.append("CALLERS or CALLEES")
+    hint_str = ", ".join(category_hint) if category_hint else "CALLERS or CALLEES"
 
     return f"""\
 File: {filepath}
@@ -103,37 +144,58 @@ File: {filepath}
 Source code:
 {code}
 
-Generate exactly {n} benchmark questions about this file.
+{_CATEGORY_GUIDE}
 
-Rules:
-- Each question must be answerable ONLY from the code/facts above — no guessing
-- Cover at least one from each available category: function calls, data access (DB/Redis/queues/HTTP), or route/handler flow
-- Name specific functions, tables, routes, or fields in both question and answer
-- Avoid "why" or intent questions — only structural/behavioral questions
-- Answers should be 2-5 sentences, precise
+Generate exactly {n} benchmark questions about this file.
+Prefer categories: {hint_str}
+
+Requirements for each question:
+- Must be answerable from the INDEXED SYMBOLS and FACTS shown above (not from raw code literals)
+- Must name the specific function, route, or table in the question
+- Must be one of the ALLOWED categories — if no facts/routes exist, use CALLERS or CALLEES only
+- Answer must be 1-2 sentences citing specific function or table names — no preamble
 
 Reply as a JSON array (no markdown fences):
 [
-  {{"question": "...", "answer": "..."}},
+  {{"question": "...", "answer": "...", "category": "CALLERS|CALLEES|DB_ACCESS|ROUTES|FLOW"}},
   ...
 ]"""
 
 
 def opus_generate(filepath: str, code: str, n: int, symbols: list, facts: list) -> list:
     prompt = make_prompt(filepath, code, n, symbols, facts)
+    raw = ""
     try:
-        r = subprocess.run(
-            ["claude", "-p", prompt, "--model", OPUS_MODEL,
-             "--output-format", "json",
-             "--append-system-prompt", SYSTEM],
-            capture_output=True, text=True, timeout=120,
-        )
-        try:
-            raw = json.loads(r.stdout)["result"].strip()
-        except Exception:
-            raw = r.stdout.strip()
+        if _ANTHROPIC_KEY:
+            payload = json.dumps({
+                "model": OPUS_MODEL,
+                "max_tokens": 800,
+                "system": SYSTEM,
+                "messages": [{"role": "user", "content": prompt}],
+            }).encode()
+            req = urllib.request.Request(
+                _ANTHROPIC_URL, data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": _ANTHROPIC_KEY,
+                    "anthropic-version": "2023-06-01",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = json.loads(resp.read())["content"][0]["text"].strip()
+        else:
+            r = subprocess.run(
+                ["claude", "-p", prompt, "--model", OPUS_MODEL,
+                 "--output-format", "json",
+                 "--append-system-prompt", SYSTEM],
+                capture_output=True, text=True, timeout=120,
+            )
+            try:
+                raw = json.loads(r.stdout)["result"].strip()
+            except Exception:
+                raw = r.stdout.strip()
 
-        # strip accidental markdown fences
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -145,7 +207,7 @@ def opus_generate(filepath: str, code: str, n: int, symbols: list, facts: list) 
             return [p for p in pairs if isinstance(p, dict)
                     and "question" in p and "answer" in p]
     except Exception as e:
-        print(f"  [warn] opus failed for {filepath}: {e}\n  stderr: {r.stderr[:200] if 'r' in dir() else ''}", file=sys.stderr)
+        print(f"  [warn] opus failed for {filepath}: {e}", file=sys.stderr)
     return []
 
 
@@ -203,6 +265,7 @@ def main():
             for p in pairs[:want]:
                 record = {
                     "source_file": frec.path,
+                    "category": p.get("category", ""),
                     "messages": [
                         {"role": "user",      "content": p["question"]},
                         {"role": "assistant", "content": p["answer"]},
@@ -210,7 +273,8 @@ def main():
                 }
                 fh.write(json.dumps(record) + "\n")
                 pairs_written += 1
-                print(f"    Q: {p['question'][:90]}")
+                cat = p.get("category", "")
+                print(f"    [{cat}] {p['question'][:85]}")
 
     print(f"\nWrote {pairs_written} Q&A pairs → {out}")
 

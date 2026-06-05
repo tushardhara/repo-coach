@@ -20,6 +20,8 @@ import os
 import statistics
 import subprocess
 import sys
+import urllib.request
+import urllib.error
 
 # Make repo_coach importable
 REPO_COACH_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -96,12 +98,37 @@ def extract_graph_evidence(graph, question: str) -> str:
     elif strategy == "table":
         return pack_table_evidence(question, result if isinstance(result, dict) else {"raw": result})
     else:
-        sym = result[0] if isinstance(result, list) and result else (result if isinstance(result, dict) else {})
+        # result is from find_files — file records have no "id".
+        # Follow up with find_symbols to get a real symbol, then enrich.
+        sym_results = json.loads(graph.dispatch_tool("find_symbols", {"query": question}))
+        sym = sym_results[0] if sym_results else {}
         sym_id = sym.get("id", "")
-        callees = json.loads(graph.dispatch_tool("get_callees", {"symbol_id": sym_id})) if sym_id else []
-        callers = json.loads(graph.dispatch_tool("get_callers", {"symbol_id": sym_id})) if sym_id else []
-        facts_raw = json.loads(graph.dispatch_tool("get_facts", {"symbol_id": sym_id})) if sym_id else []
-        return pack_symbol_evidence(question, sym, callees, callers, facts_raw)
+
+        # If find_symbols found nothing useful, try symbols from the top file
+        if not sym_id and isinstance(result, list) and result:
+            top_file = result[0].get("file", "")
+            if top_file:
+                file_syms = json.loads(graph.dispatch_tool("find_symbols", {"query": top_file}))
+                sym = file_syms[0] if file_syms else {}
+                sym_id = sym.get("id", "")
+
+        callees  = json.loads(graph.dispatch_tool("get_callees", {"symbol_id": sym_id})) if sym_id else []
+        callers  = json.loads(graph.dispatch_tool("get_callers", {"symbol_id": sym_id})) if sym_id else []
+        facts_raw = json.loads(graph.dispatch_tool("get_facts",  {"symbol_id": sym_id})) if sym_id else []
+
+        base = pack_symbol_evidence(question, sym, callees, callers, facts_raw)
+
+        # Append code snippet for additional grounding
+        if sym_id:
+            try:
+                code_data = json.loads(graph.dispatch_tool("get_code", {"symbol_id": sym_id}))
+                snippet = code_data.get("code", "") if isinstance(code_data, dict) else ""
+                if snippet:
+                    base += f"\n\nCODE ({sym.get('name','')}):\n{snippet[:1200]}"
+            except Exception:
+                pass
+
+        return base
 
 
 _SETUP_NAMES = {"setup", "init", "main", "register", "routes", "router"}
@@ -111,18 +138,60 @@ def _is_setup(handler_id: str) -> bool:
     return any(w in name for w in _SETUP_NAMES)
 
 
+_ANSWER_INSTRUCTION = (
+    "Answer in 1-3 sentences. Name specific functions/tables. No preamble."
+)
+
 def build_prompt_with_graph(question: str, evidence: str) -> str:
     return (
-        f"You are a senior engineer answering questions about a codebase.\n"
-        f"Use ONLY the evidence below — do not guess.\n\n"
+        f"Codebase Q&A. Use ONLY the evidence. {_ANSWER_INSTRUCTION}\n\n"
         f"EVIDENCE:\n{evidence}\n\n"
         f"QUESTION: {question}"
     )
+
+def build_prompt_raw(question: str) -> str:
+    return f"Codebase Q&A. {_ANSWER_INSTRUCTION}\n\nQUESTION: {question}"
+
+
+# ── Anthropic API (direct, no subprocess overhead) ────────────────────────────
+
+_ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+_ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+
+def _anthropic(model_id: str, prompt: str, max_tokens: int = 150) -> str:
+    if not _ANTHROPIC_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+    payload = json.dumps({
+        "model": model_id,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+    req = urllib.request.Request(
+        _ANTHROPIC_URL,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": _ANTHROPIC_KEY,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = json.loads(resp.read())
+            return body["content"][0]["text"].strip()
+    except urllib.error.HTTPError as e:
+        return f"[error: HTTP {e.code} {e.read().decode()[:120]}]"
+    except Exception as e:
+        return f"[error: {e}]"
 
 
 # ── Claude answer ─────────────────────────────────────────────────────────────
 
 def claude_answer(model_id: str, prompt: str) -> str:
+    if _ANTHROPIC_KEY:
+        return _anthropic(model_id, prompt, max_tokens=150)
+    # fallback: subprocess (slow — set ANTHROPIC_API_KEY to avoid)
     try:
         r = subprocess.run(
             ["claude", "-p", prompt, "--model", model_id, "--output-format", "json"],
@@ -161,27 +230,29 @@ def judge(question: str, reference: str, candidate: str) -> int:
     if not candidate or candidate.startswith("[error"):
         return 0
     prompt = (
-        "You are grading a coding assistant's answer.\n"
-        f"QUESTION: {question}\n\n"
-        f"REFERENCE (ideal) ANSWER: {reference}\n\n"
-        f"CANDIDATE ANSWER: {candidate}\n\n"
-        "Score the candidate 1-5 for correctness and usefulness vs the reference "
-        "(5=as good or better, 1=wrong/useless). Reply with ONLY the integer."
+        f"QUESTION: {question}\n"
+        f"REFERENCE: {reference}\n"
+        f"CANDIDATE: {candidate}\n\n"
+        "Score candidate 1-5 vs reference (5=correct, 1=wrong). Reply with ONLY the digit."
     )
-    try:
-        r = subprocess.run(
-            ["claude", "-p", prompt, "--model", JUDGE_MODEL, "--output-format", "json"],
-            capture_output=True, text=True, timeout=120,
-        )
+    txt = _anthropic(JUDGE_MODEL, prompt, max_tokens=5) if _ANTHROPIC_KEY else ""
+    if not txt:
+        # fallback subprocess
         try:
-            txt = json.loads(r.stdout)["result"]
+            r = subprocess.run(
+                ["claude", "-p", prompt, "--model", JUDGE_MODEL, "--output-format", "json"],
+                capture_output=True, text=True, timeout=120,
+            )
+            try:
+                txt = json.loads(r.stdout)["result"]
+            except Exception:
+                txt = r.stdout
         except Exception:
-            txt = r.stdout
-        for tok in txt.split():
-            if tok.strip().isdigit():
-                return max(1, min(5, int(tok.strip())))
-    except Exception:
-        pass
+            return 0
+    for tok in txt.split():
+        t = tok.strip().rstrip(".")
+        if t.isdigit():
+            return max(1, min(5, int(t)))
     return 0
 
 
@@ -259,15 +330,16 @@ def main():
         q   = it["messages"][0]["content"]
         ref = it["messages"][1]["content"]
         src = it.get("source_file", "")
-        src_tag = f" [{src}]" if src else ""
-        log(f"\nQ{i}/{len(items)}{src_tag}: {q[:80]}")
+        cat = it.get("category", "")
+        tag = f" [{cat}|{src}]" if src else (f" [{cat}]" if cat else "")
+        log(f"\nQ{i}/{len(items)}{tag}: {q[:80]}")
 
         # Extract graph evidence once per question
         log(f"  Q{i} → extracting graph evidence...")
         evidence = extract_graph_evidence(graph, q)
         log(f"  Q{i} → evidence: {len(evidence)} chars | strategy hint in first 60: {evidence[:60]!r}")
 
-        prompt_raw   = q
+        prompt_raw   = build_prompt_raw(q)
         prompt_graph = build_prompt_with_graph(q, evidence)
 
         for model_key, model_id in CLAUDE_MODELS.items():
